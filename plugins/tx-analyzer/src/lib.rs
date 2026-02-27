@@ -223,7 +223,7 @@ impl Plugin for TransactionAnalyzerPlugin {
             id: "tx-analyzer".to_string(),
             name: "Transaction Analyzer".to_string(),
             version: "0.1.0".to_string(),
-            author: "Ratacat Team".to_string(),
+            author: "NEARx Team".to_string(),
             description: "Analyzes NEAR transactions for patterns and insights".to_string(),
             capabilities: vec![
                 Capability::TransactionAnalysis,

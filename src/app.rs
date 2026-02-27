@@ -35,8 +35,8 @@ pub enum FullscreenContentType {
 /// Interaction mode when fullscreen is active
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FullscreenMode {
-    Scroll,    // Arrow keys scroll the JSON content
-    Navigate,  // Arrow keys navigate underlying pane (Blocks/Txs rows)
+    Scroll,   // Arrow keys scroll the JSON content
+    Navigate, // Arrow keys navigate underlying pane (Blocks/Txs rows)
 }
 
 /// Reason for block selection change - determines tx selection behavior
@@ -49,6 +49,9 @@ enum BlockChangeReason {
 
 const BACK_WINDOW: usize = 50;
 const FRONT_WINDOW: u64 = 50;
+
+/// Maximum number of full transaction JSONs to cache (256 * ~100KB = ~25MB worst case)
+const MAX_FULL_TX: usize = 256;
 
 /// Backwards-fill slot for the block list (ancestors of the anchor block).
 #[derive(Debug, Clone)]
@@ -238,6 +241,22 @@ pub struct App {
     loading_block: Option<u64>, // Block height currently being fetched from archival
     archival_fetch_tx: Option<tokio::sync::mpsc::UnboundedSender<u64>>, // Channel to request archival fetches
 
+    // FastNEAR API configuration (reserved for future FastNEAR /v0/transactions endpoint)
+    #[allow(dead_code)]
+    fastnear_api_url: String,
+    #[allow(dead_code)]
+    fastnear_auth_token: Option<String>,
+    // Channel to request tx details: (tx_hash, sender_account_id)
+    tx_details_fetch_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
+
+    // Performance: Cache parsed JSON to avoid expensive recursive parsing
+    parsed_json_cache: HashMap<String, String>, // cache_key -> parsed_json (for blocks)
+
+    // Transaction details cache (separate from blocks, bounded at MAX_FULL_TX)
+    full_tx_cache: HashMap<String, String>, // tx_hash -> full archival JSON
+    full_tx_order: Vec<String>,             // LRU tracking for tx cache eviction
+    tx_details_in_flight: std::collections::HashSet<String>, // Dedupe in-flight requests
+
     /// When true, new live blocks from RPC are ignored.
     /// Set when user is pinned far behind the live tip (>50 blocks past focal).
     live_updates_paused: bool,
@@ -259,10 +278,10 @@ pub struct App {
     toast_message: Option<(String, Instant)>, // (message, timestamp)
 
     // UI layout state
-    details_fullscreen: bool,                   // Spacebar toggle for 100% details view
+    details_fullscreen: bool, // Spacebar toggle for 100% details view
     fullscreen_content_type: FullscreenContentType, // What to show in fullscreen
-    fullscreen_mode: FullscreenMode,            // Scroll (arrow keys scroll JSON) or Navigate (arrow keys move rows)
-    details_viewport_height: u16,               // Actual visible height of details pane (set by UI layer)
+    fullscreen_mode: FullscreenMode, // Scroll (arrow keys scroll JSON) or Navigate (arrow keys move rows)
+    details_viewport_height: u16,    // Actual visible height of details pane (set by UI layer)
 
     // Theme (single source of truth for all UI targets)
     theme: Theme,
@@ -282,6 +301,9 @@ impl App {
         keep_blocks: usize,
         default_filter: String,
         archival_fetch_tx: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
+        fastnear_api_url: String,
+        fastnear_auth_token: Option<String>,
+        tx_details_fetch_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
     ) -> Self {
         let filter_compiled = if default_filter.is_empty() {
             CompiledFilter::default()
@@ -317,20 +339,27 @@ impl App {
             cached_block_order: Vec::new(),
             loading_block: None,
             archival_fetch_tx,
+            fastnear_api_url,
+            fastnear_auth_token,
+            tx_details_fetch_tx,
+            parsed_json_cache: HashMap::new(),
+            full_tx_cache: HashMap::new(),
+            full_tx_order: Vec::new(),
+            tx_details_in_flight: std::collections::HashSet::new(),
             live_updates_paused: false, // Start with live updates enabled
             back_slots: Vec::new(),
             back_anchor_height: None,
             back_next_request_at: None,
             back_slots_target: BACK_WINDOW,
             debug_log: Vec::new(),
-            debug_visible: false, // Hidden by default
+            debug_visible: false,     // Hidden by default
             shortcuts_visible: false, // Hidden by default (Web/Tauri only for now)
             toast_message: None,
-            details_fullscreen: false,                          // Normal view by default
+            details_fullscreen: false, // Normal view by default
             fullscreen_content_type: FullscreenContentType::ParsedDetails, // Default to parsed view
-            fullscreen_mode: FullscreenMode::Scroll,            // Scroll mode by default
-            details_viewport_height: 20,                        // Default estimate, will be updated by UI
-            theme: Theme::default(),                            // Single source of truth for UI colors
+            fullscreen_mode: FullscreenMode::Scroll, // Scroll mode by default
+            details_viewport_height: 20, // Default estimate, will be updated by UI
+            theme: Theme::default(),   // Single source of truth for UI colors
             #[cfg(feature = "native")]
             rat_styles_cache: None, // Computed on first use
             ui_flags: UiFlags::default(), // Safe defaults for Web/Tauri
@@ -448,7 +477,8 @@ impl App {
 
             // If viewing cached block, inject it at correct position
             if viewing_cached {
-                if let Some(cached_block) = self.sel_block_height
+                if let Some(cached_block) = self
+                    .sel_block_height
                     .and_then(|h| self.cached_blocks.get(&h))
                 {
                     // Find insertion point (sorted by height descending)
@@ -462,9 +492,14 @@ impl App {
             }
 
             // Find selection index in the (possibly injected) list
-            let idx = self.sel_block_height
+            let idx = self
+                .sel_block_height
                 .and_then(|h| all_blocks.iter().position(|b| b.height == h))
-                .or(if !all_blocks.is_empty() { Some(0) } else { None });
+                .or(if !all_blocks.is_empty() {
+                    Some(0)
+                } else {
+                    None
+                });
 
             return (all_blocks, idx, total);
         }
@@ -478,7 +513,8 @@ impl App {
 
         // If viewing cached block AND it has matching txs, inject it
         if viewing_cached {
-            if let Some(cached_block) = self.sel_block_height
+            if let Some(cached_block) = self
+                .sel_block_height
                 .and_then(|h| self.cached_blocks.get(&h))
             {
                 if self.count_matching_txs(cached_block) > 0 {
@@ -640,7 +676,7 @@ impl App {
     }
 
     /// Get raw JSON of currently selected block (for fullscreen display/copying)
-    pub fn get_raw_block_json(&self) -> String {
+    pub fn get_raw_block_json(&mut self) -> String {
         // Check if we have any blocks loaded at all
         if self.blocks.is_empty() && self.cached_blocks.is_empty() {
             return "Waiting for blocks to load...".to_string();
@@ -648,14 +684,32 @@ impl App {
 
         match self.current_block() {
             Some(block) => {
-                // Serialize with 100KB truncation to prevent UI freezing on massive blocks
+                let cache_key = format!("block_{}", block.height);
+
+                // Check cache first to avoid expensive recursive parsing
+                if let Some(cached) = self.parsed_json_cache.get(&cache_key) {
+                    return cached.clone();
+                }
+
+                // Cache miss - compute and store
                 match serde_json::to_value(block) {
-                    Ok(val) => {
+                    Ok(mut val) => {
                         // Guard against null values (shouldn't happen but was in old code)
                         if val.is_null() {
                             "Error: Block serialized to null".to_string()
                         } else {
-                            crate::json_pretty::pretty_safe(&val, 2, 100 * 1024)
+                            // Apply recursive JSON parsing to nested string fields
+                            val = crate::json_auto_parse::auto_parse_nested_json(val, 5, 0);
+                            let raw_json = crate::json_pretty::pretty_safe(&val, 2, 100 * 1024);
+
+                            self.parsed_json_cache.insert(cache_key, raw_json.clone());
+
+                            // Evict cache if too large
+                            if self.parsed_json_cache.len() > 100 {
+                                self.parsed_json_cache.clear();
+                            }
+
+                            raw_json
                         }
                     }
                     Err(e) => {
@@ -675,12 +729,33 @@ impl App {
     }
 
     /// Get raw JSON of currently selected transaction (for fullscreen display/copying)
-    pub fn get_raw_tx_json(&self) -> String {
+    pub fn get_raw_tx_json(&mut self) -> String {
         if let Some(block) = self.current_block() {
             if let Some(tx) = block.transactions.get(self.sel_tx) {
-                // Serialize with 100KB truncation to prevent UI freezing on massive transactions
-                let val = serde_json::to_value(tx).unwrap_or(serde_json::Value::Null);
-                return crate::json_pretty::pretty_safe(&val, 2, 100 * 1024);
+                // Check full_tx_cache first for archival RPC data
+                if let Some(full_json) = self.full_tx_cache.get(&tx.hash) {
+                    return full_json.clone();
+                }
+
+                // Fall back to parsed_json_cache (for TxLite from chunks)
+                let cache_key = format!("tx_{}", tx.hash);
+                if let Some(cached) = self.parsed_json_cache.get(&cache_key) {
+                    return cached.clone();
+                }
+
+                // Cache miss - compute TxLite JSON and store
+                let mut val = serde_json::to_value(tx).unwrap_or(serde_json::Value::Null);
+                val = crate::json_auto_parse::auto_parse_nested_json(val, 5, 0);
+                let raw_json = crate::json_pretty::pretty_safe(&val, 2, 100 * 1024);
+
+                self.parsed_json_cache.insert(cache_key, raw_json.clone());
+
+                // Evict cache if too large
+                if self.parsed_json_cache.len() > 100 {
+                    self.parsed_json_cache.clear();
+                }
+
+                return raw_json;
             }
         }
         "No transaction selected".to_string()
@@ -880,7 +955,11 @@ impl App {
         use crate::constants::app::ARCHIVAL_CONTEXT_BLOCKS;
 
         // Determine latest known block height (can't request future blocks)
-        let latest_known = self.blocks.first().map(|b| b.height).unwrap_or(center_height);
+        let latest_known = self
+            .blocks
+            .first()
+            .map(|b| b.height)
+            .unwrap_or(center_height);
 
         // --- Walk BACKWARD (±50 blocks behind center) ---
         let backward_target = center_height.saturating_sub(ARCHIVAL_CONTEXT_BLOCKS);
@@ -971,10 +1050,10 @@ impl App {
             self.details_fullscreen = true;
             self.fullscreen_mode = FullscreenMode::Scroll;
             self.fullscreen_content_type = match self.pane {
-                0 => FullscreenContentType::BlockRawJson,       // Blocks pane
+                0 => FullscreenContentType::BlockRawJson, // Blocks pane
                 1 => FullscreenContentType::TransactionRawJson, // Txs pane
-                2 => FullscreenContentType::ParsedDetails,      // Details pane
-                _ => FullscreenContentType::ParsedDetails,      // Fallback
+                2 => FullscreenContentType::ParsedDetails, // Details pane
+                _ => FullscreenContentType::ParsedDetails, // Fallback
             };
             let content_type = match self.fullscreen_content_type {
                 FullscreenContentType::BlockRawJson => "block raw JSON",
@@ -1011,10 +1090,7 @@ impl App {
             FullscreenMode::Scroll => FullscreenMode::Navigate,
             FullscreenMode::Navigate => FullscreenMode::Scroll,
         };
-        self.log_debug(format!(
-            "Fullscreen mode: {:?}",
-            self.fullscreen_mode
-        ));
+        self.log_debug(format!("Fullscreen mode: {:?}", self.fullscreen_mode));
     }
 
     /// Return to auto-follow mode (track newest block)
@@ -1059,7 +1135,7 @@ impl App {
     /// Get copy content for the currently focused pane.
     ///
     /// Delegates to `copy_api` for consistent behavior across all targets.
-    pub fn get_copy_content(&self) -> String {
+    pub fn get_copy_content(&mut self) -> String {
         crate::copy_api::current_text(self).unwrap_or_default()
     }
 
@@ -1086,6 +1162,40 @@ impl App {
         }
     }
 
+    fn lock_to_block_height_from_route(&mut self, height: u64) {
+        self.sel_block_height = Some(height);
+        self.follow_blocks_latest = false;
+
+        if self.is_block_available(height) {
+            self.cache_block_with_context(height);
+        } else {
+            self.request_archival_block(height);
+        }
+
+        self.validate_and_refresh_tx(BlockChangeReason::ManualNav);
+    }
+
+    fn lock_to_block_hash_from_route(&mut self, block_hash: &str) -> bool {
+        let height = self
+            .blocks
+            .iter()
+            .find(|b| b.hash.eq_ignore_ascii_case(block_hash))
+            .map(|b| b.height)
+            .or_else(|| {
+                self.cached_blocks
+                    .iter()
+                    .find(|(_, b)| b.hash.eq_ignore_ascii_case(block_hash))
+                    .map(|(h, _)| *h)
+            });
+
+        if let Some(h) = height {
+            self.lock_to_block_height_from_route(h);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Apply a deep link route to the current app state
     ///
     /// This method maps deep link routes to the existing explorer UI by:
@@ -1093,33 +1203,94 @@ impl App {
     /// - Applying filters to match the route target
     ///
     /// Example routes:
-    /// - `Tx{hash}` → Focus transactions pane, filter to hash
-    /// - `Block{height}` → Focus blocks pane, filter to height
-    /// - `Account{id}` → Focus transactions pane, filter to account
+    /// - `Tx` → Focus transactions pane, filter to transaction hash
+    /// - `Block` → Focus blocks pane and lock to specific block
+    /// - `Account` / `Contract` / `AccessKey` → Apply scoped filters
     pub fn apply_route(&mut self, route: &crate::router::Route) {
-        use crate::router::{Route, RouteV1};
+        use crate::router::{BlockRef, Route, RouteV1};
 
         match route {
-            Route::V1(RouteV1::Tx { hash }) => {
-                // Focus transactions pane and filter to the specific hash
+            Route::V1(RouteV1::Tx {
+                tx_hash,
+                block,
+                network,
+            }) => {
                 self.set_pane_direct(1);
-                self.filter_query = hash.clone();
+                self.filter_query = format!("hash:{tx_hash}");
                 self.apply_filter();
-                self.log_debug(format!("Route: tx/{hash}"));
+
+                if let Some(block_hint) = block {
+                    match block_hint {
+                        BlockRef::Height(height) => self.lock_to_block_height_from_route(*height),
+                        BlockRef::Hash(hash) => {
+                            if !self.lock_to_block_hash_from_route(hash) {
+                                self.show_toast(format!(
+                                    "Block hash hint not found in local buffer: {hash}"
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                self.log_debug(format!(
+                    "Route: tx/{tx_hash} block_hint={block:?} network={network:?}"
+                ));
             }
-            Route::V1(RouteV1::Block { height }) => {
-                // Focus blocks pane and filter to the specific height
+            Route::V1(RouteV1::Block { block, network }) => {
                 self.set_pane_direct(0);
-                self.filter_query = format!("height:{height}");
-                self.apply_filter();
-                self.log_debug(format!("Route: block/{height}"));
+                self.clear_filter();
+
+                match block {
+                    BlockRef::Height(height) => self.lock_to_block_height_from_route(*height),
+                    BlockRef::Hash(hash) => {
+                        if !self.lock_to_block_hash_from_route(hash) {
+                            self.show_toast(format!(
+                                "Block hash not in local buffer; try block height: {hash}"
+                            ));
+                        }
+                    }
+                }
+
+                self.log_debug(format!("Route: block/{block:?} network={network:?}"));
             }
-            Route::V1(RouteV1::Account { id }) => {
-                // Focus transactions pane and filter to the account
+            Route::V1(RouteV1::Account {
+                account_id,
+                network,
+            }) => {
                 self.set_pane_direct(1);
-                self.filter_query = format!("acct:{id}");
+                self.filter_query = format!("acct:{account_id}");
                 self.apply_filter();
-                self.log_debug(format!("Route: account/{id}"));
+                self.log_debug(format!("Route: account/{account_id} network={network:?}"));
+            }
+            Route::V1(RouteV1::Contract {
+                account_id,
+                method,
+                network,
+            }) => {
+                self.set_pane_direct(1);
+                let mut query = format!("receiver:{account_id} action:FunctionCall,DeployContract");
+                if let Some(m) = method {
+                    query.push_str(" method:");
+                    query.push_str(m);
+                }
+                self.filter_query = query;
+                self.apply_filter();
+                self.log_debug(format!(
+                    "Route: contract/{account_id} method={method:?} network={network:?}"
+                ));
+            }
+            Route::V1(RouteV1::AccessKey {
+                account_id,
+                public_key,
+                network,
+            }) => {
+                self.set_pane_direct(1);
+                self.filter_query =
+                    format!("acct:{account_id} action:AddKey,DeleteKey raw:{public_key}");
+                self.apply_filter();
+                self.log_debug(format!(
+                    "Route: access-key/{account_id}/{public_key} network={network:?}"
+                ));
             }
             Route::V1(RouteV1::Home) => {
                 // Clear filter and return to auto-follow mode
@@ -1163,7 +1334,9 @@ impl App {
         }
 
         // If in fullscreen mode showing block JSON, update it when block changes
-        if self.details_fullscreen && self.fullscreen_content_type == FullscreenContentType::BlockRawJson {
+        if self.details_fullscreen
+            && self.fullscreen_content_type == FullscreenContentType::BlockRawJson
+        {
             let raw = self.get_raw_block_json();
             self.set_details_json(raw);
         }
@@ -1415,7 +1588,6 @@ impl App {
         }
     }
 
-
     /// Left arrow: Jump to top of current list
     pub fn left(&mut self) {
         match self.pane {
@@ -1569,15 +1741,54 @@ impl App {
         }
     }
 
-
     pub fn select_tx(&mut self) {
-        if let Some(b) = self.current_block() {
+        if self.current_block().is_some() {
             let (filtered_txs, _, _) = self.txs();
             if let Some(tx) = filtered_txs.get(self.sel_tx) {
-                // Show raw transaction JSON (full data)
-                let val = serde_json::to_value(tx).unwrap_or(serde_json::Value::Null);
+                let cache_key = format!("tx_{}", tx.hash);
+
+                // Check cache first to avoid expensive recursive parsing
+                if let Some(cached) = self.parsed_json_cache.get(&cache_key) {
+                    self.set_details_json(cached.clone());
+
+                    // Trigger background fetch for full tx details if we have sender_id
+                    // Only send if not already in flight (deduplication)
+                    if let (Some(tx_details_tx), Some(sender_id)) =
+                        (&self.tx_details_fetch_tx, &tx.signer_id)
+                    {
+                        if !self.tx_details_in_flight.contains(&tx.hash) {
+                            self.tx_details_in_flight.insert(tx.hash.clone());
+                            let _ = tx_details_tx.send((tx.hash.clone(), sender_id.clone()));
+                        }
+                    }
+
+                    return;
+                }
+
+                // Cache miss - compute and store
+                let mut val = serde_json::to_value(tx).unwrap_or(serde_json::Value::Null);
+                val = crate::json_auto_parse::auto_parse_nested_json(val, 5, 0);
                 let raw_json = crate::json_pretty::pretty_safe(&val, 2, 100 * 1024);
+
+                self.parsed_json_cache.insert(cache_key, raw_json.clone());
+
+                // Evict cache if too large (simple LRU: clear all)
+                if self.parsed_json_cache.len() > 100 {
+                    self.parsed_json_cache.clear();
+                }
+
                 self.set_details_json(raw_json);
+
+                // Trigger background fetch for full tx details if we have sender_id
+                // Only send if not already in flight (deduplication)
+                if let (Some(tx_details_tx), Some(sender_id)) =
+                    (&self.tx_details_fetch_tx, &tx.signer_id)
+                {
+                    if !self.tx_details_in_flight.contains(&tx.hash) {
+                        self.tx_details_in_flight.insert(tx.hash.clone());
+                        let _ = tx_details_tx.send((tx.hash.clone(), sender_id.clone()));
+                    }
+                }
             }
         }
     }
@@ -1585,16 +1796,58 @@ impl App {
     /// Select first transaction, bypassing filter (for first block UX)
     pub fn select_tx_bypass_filter(&mut self) {
         // Clone the data we need before mutating self
-        let block_data = self.current_block().map(|b| (b.height, b.transactions.clone()));
+        let block_data = self
+            .current_block()
+            .map(|b| (b.height, b.transactions.clone()));
 
-        if let Some((block_height, all_txs)) = block_data {
+        if let Some((_, all_txs)) = block_data {
             if let Some(tx) = all_txs.first() {
                 self.sel_tx = 0;
 
-                // Show raw transaction JSON (full data)
-                let val = serde_json::to_value(tx).unwrap_or(serde_json::Value::Null);
+                let cache_key = format!("tx_{}", tx.hash);
+
+                // Check cache first to avoid expensive recursive parsing
+                if let Some(cached) = self.parsed_json_cache.get(&cache_key) {
+                    self.set_details_json(cached.clone());
+
+                    // Trigger background fetch for full tx details if we have sender_id
+                    // Only send if not already in flight (deduplication)
+                    if let (Some(tx_details_tx), Some(sender_id)) =
+                        (&self.tx_details_fetch_tx, &tx.signer_id)
+                    {
+                        if !self.tx_details_in_flight.contains(&tx.hash) {
+                            self.tx_details_in_flight.insert(tx.hash.clone());
+                            let _ = tx_details_tx.send((tx.hash.clone(), sender_id.clone()));
+                        }
+                    }
+
+                    return;
+                }
+
+                // Cache miss - compute and store
+                let mut val = serde_json::to_value(tx).unwrap_or(serde_json::Value::Null);
+                val = crate::json_auto_parse::auto_parse_nested_json(val, 5, 0);
                 let raw_json = crate::json_pretty::pretty_safe(&val, 2, 100 * 1024);
+
+                self.parsed_json_cache.insert(cache_key, raw_json.clone());
+
+                // Evict cache if too large
+                if self.parsed_json_cache.len() > 100 {
+                    self.parsed_json_cache.clear();
+                }
+
                 self.set_details_json(raw_json);
+
+                // Trigger background fetch for full tx details if we have sender_id
+                // Only send if not already in flight (deduplication)
+                if let (Some(tx_details_tx), Some(sender_id)) =
+                    (&self.tx_details_fetch_tx, &tx.signer_id)
+                {
+                    if !self.tx_details_in_flight.contains(&tx.hash) {
+                        self.tx_details_in_flight.insert(tx.hash.clone());
+                        let _ = tx_details_tx.send((tx.hash.clone(), sender_id.clone()));
+                    }
+                }
             } else {
                 self.set_details_json("No transactions".to_string());
             }
@@ -1759,6 +2012,19 @@ impl App {
 
                 self.push_block(block);
             }
+            AppEvent::FetchedTxDetails { tx_hash, json_data } => {
+                // Transaction details fetched from archival RPC
+                log::info!("[App] Received tx details for {}", tx_hash);
+
+                // Store in full_tx_cache (with bounded LRU eviction)
+                self.insert_full_tx(tx_hash.clone(), json_data.clone());
+
+                // Remove from in-flight set (request completed)
+                self.tx_details_in_flight.remove(&tx_hash);
+
+                // Update Details pane with full archival JSON
+                self.set_details_json(json_data);
+            }
         }
     }
 
@@ -1775,13 +2041,16 @@ impl App {
         ));
 
         // Determine if this is a historical block (older than current newest)
-        let is_historical = self.blocks.first()
+        let is_historical = self
+            .blocks
+            .first()
             .map(|newest| height < newest.height)
             .unwrap_or(false);
 
         if is_historical {
             // Historical block: insert at correct sorted position (descending height)
-            let insert_pos = self.blocks
+            let insert_pos = self
+                .blocks
                 .iter()
                 .position(|existing| existing.height < height)
                 .unwrap_or(self.blocks.len());
@@ -1855,8 +2124,7 @@ impl App {
         }
 
         // Keep archival window filled when pinned to a specific block
-        if !self.follow_blocks_latest {
-        }
+        if !self.follow_blocks_latest {}
     }
 
     // ----- Search methods -----
@@ -1977,7 +2245,7 @@ impl App {
                 self.sel_block_height = Some(height); // Lock to specific block height
                 self.follow_blocks_latest = false; // Jumping to mark disables auto-follow
                 self.ensure_block_window_by_chain(height); // Chain-walk backfill
-                    self.validate_and_refresh_tx(BlockChangeReason::ManualNav);
+                self.validate_and_refresh_tx(BlockChangeReason::ManualNav);
             }
         }
         self.pane = mark.pane as usize;
@@ -2062,6 +2330,24 @@ impl App {
         self.details_buf.full_text()
     }
 
+    /// Insert a full transaction JSON into the cache with LRU eviction
+    fn insert_full_tx(&mut self, tx_hash: String, json: String) {
+        // Update cache entry
+        self.full_tx_cache.insert(tx_hash.clone(), json);
+
+        // Update LRU order: remove if exists, then push to end (most recent)
+        self.full_tx_order.retain(|k| k != &tx_hash);
+        self.full_tx_order.push(tx_hash);
+
+        // Evict oldest entries if cache exceeds MAX_FULL_TX
+        while self.full_tx_order.len() > MAX_FULL_TX {
+            if let Some(old_key) = self.full_tx_order.first().cloned() {
+                self.full_tx_order.remove(0);
+                self.full_tx_cache.remove(&old_key);
+            }
+        }
+    }
+
     /// Get details as pretty-printed string (legacy compatibility)
     pub fn details_pretty_string(&self) -> String {
         self.details_buf.full_text().to_string()
@@ -2074,7 +2360,8 @@ impl App {
 
     /// Scroll Details by delta lines
     pub fn scroll_details_lines(&mut self, delta: isize) {
-        self.details_buf.scroll_lines(delta, self.details_viewport_lines);
+        self.details_buf
+            .scroll_lines(delta, self.details_viewport_lines);
     }
 
     /// Jump to top of Details
@@ -2084,16 +2371,20 @@ impl App {
 
     /// Jump to bottom of Details
     pub fn details_end(&mut self) {
-        self.details_buf.scroll_to_bottom(self.details_viewport_lines);
+        self.details_buf
+            .scroll_to_bottom(self.details_viewport_lines);
     }
 
     /// Get scroll info for status display
     pub fn details_scroll_info(&self) -> (usize, usize) {
-        (self.details_buf.current_scroll_line(), self.details_buf.total_lines())
+        (
+            self.details_buf.current_scroll_line(),
+            self.details_buf.total_lines(),
+        )
     }
 
     /// Get JSON for currently focused pane (for copy operation)
-    pub fn focused_json_string(&self) -> Option<String> {
+    pub fn focused_json_string(&mut self) -> Option<String> {
         Some(self.get_copy_content())
     }
 

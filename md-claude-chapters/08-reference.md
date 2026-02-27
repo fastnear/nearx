@@ -6,7 +6,7 @@ This chapter contains technical reference information including dependencies, pe
 
 ### Quad-Mode Dependency Strategy
 
-Ratacat uses **feature flags** and **optional dependencies** with strict `dep:` mappings to prevent cross-contamination:
+NEARx uses **feature flags** and **optional dependencies** with strict `dep:` mappings to prevent cross-contamination:
 
 ```toml
 [features]

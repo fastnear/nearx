@@ -1,4 +1,4 @@
-// Native binary for Ratacat - Terminal UI mode
+// Native binary for NEARx - Terminal UI mode
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -77,6 +77,9 @@ async fn main() -> Result<()> {
         } else {
             None
         },
+        cfg.fastnear_api_url.clone(),
+        cfg.fastnear_auth_token.clone(),
+        None, // tx_details_fetch_tx not used in native TUI (could add later)
     );
 
     // Apply deep link route from CLI args (if provided)
@@ -112,8 +115,7 @@ async fn main() -> Result<()> {
     jump_marks.load_from_persistence().await;
 
     // main loop
-    let mouse_enabled =
-        run_loop(&mut app, &mut terminal, rx, history, jump_marks).await?;
+    let mouse_enabled = run_loop(&mut app, &mut terminal, rx, history, jump_marks).await?;
 
     // cleanup
     source_task.abort();
@@ -189,10 +191,7 @@ async fn run_loop(
                             signer: None,
                             receiver: None,
                             actions_json: None,
-                            raw_json: Some(
-                                serde_json::to_string(&serde_json::json!({"hash": tx.hash}))
-                                    .unwrap_or_default(),
-                            ),
+                            raw_json: None, // Skip JSON serialization in hot path
                         })
                         .collect(),
                 };

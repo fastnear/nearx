@@ -1,6 +1,6 @@
 # Chapter 1: Getting Started
 
-## Ratacat - NEAR Blockchain Transaction Viewer
+## NEARx - NEAR Blockchain Transaction Viewer
 
 **Version 0.4.5+** - High-performance **quad-mode** application for monitoring NEAR Protocol blockchain transactions. Runs in terminal (native), web browser (WASM), desktop app (Tauri), AND integrates with browsers via 1Password-style extension!
 
@@ -10,11 +10,11 @@
 
 ## Quad-Mode Architecture Overview
 
-Ratacat v0.4.0 features a revolutionary **quad-deployment architecture** - write once, run everywhere:
+NEARx v0.4.0 features a revolutionary **quad-deployment architecture** - write once, run everywhere:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    Ratacat Quad-Mode Architecture                       │
+│                    NEARx Quad-Mode Architecture                       │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────────────┐ │
@@ -58,7 +58,7 @@ Ratacat v0.4.0 features a revolutionary **quad-deployment architecture** - write
 1. **Native Terminal**: Full-featured TUI with SQLite, WebSocket, file watching
 2. **Web Browser (WASM)**: Pure DOM UI with JSON bridge, RPC-only, in-memory storage
 3. **Tauri Desktop**: Native desktop app with DOM UI, deep link support (`nearx://` protocol)
-4. **Browser Extension**: 1Password-style "Open in Ratacat" button on tx pages
+4. **Browser Extension**: 1Password-style "Open in NEARx" button on tx pages
 
 ## Installation
 
@@ -128,7 +128,7 @@ cargo tauri build
 
 ### Basic Usage
 
-Once running, Ratacat will start monitoring NEAR blockchain transactions:
+Once running, NEARx will start monitoring NEAR blockchain transactions:
 
 - Use arrow keys or `j/k` to navigate blocks and transactions
 - Press `Tab` to switch between panes

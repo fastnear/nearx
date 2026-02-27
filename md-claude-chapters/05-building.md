@@ -1,11 +1,11 @@
 # Chapter 5: Building
 
-This chapter covers building Ratacat for different platforms: native terminal, web browser (WASM), and Tauri desktop.
+This chapter covers building NEARx for different platforms: native terminal, web browser (WASM), and Tauri desktop.
 
 ## Native Terminal Mode
 
 ### Font Rendering Note
-The native terminal version uses your terminal emulator's font settings. Ratacat does not control font rendering - this is managed by your terminal emulator (iTerm2, Alacritty, Terminal.app, etc.).
+The native terminal version uses your terminal emulator's font settings. NEARx does not control font rendering - this is managed by your terminal emulator (iTerm2, Alacritty, Terminal.app, etc.).
 
 ### Recommended Monospace Fonts
 - **JetBrains Mono** - Excellent Unicode coverage, designed for code

@@ -49,17 +49,31 @@ pub fn focused_pane(app: &App) -> CopyPane {
 /// Build the JSON payload for the given pane.
 ///
 /// Returns `None` if there's no content to copy (e.g., no block selected).
-pub fn payload_for(app: &App, pane: CopyPane) -> Option<Value> {
+pub fn payload_for(app: &mut App, pane: CopyPane) -> Option<Value> {
     match pane {
         CopyPane::Blocks => {
             // Use raw block JSON (same as fullscreen shows)
             let raw_json = app.get_raw_block_json();
-            serde_json::from_str::<Value>(&raw_json).ok()
+            match serde_json::from_str::<Value>(&raw_json) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    // Not valid JSON (e.g., "Waiting for blocks to load...")
+                    // Wrap it as text so copy still works
+                    Some(serde_json::json!({ "message": raw_json }))
+                }
+            }
         }
         CopyPane::Txs => {
             // Use raw transaction JSON (same as fullscreen shows)
             let raw_json = app.get_raw_tx_json();
-            serde_json::from_str::<Value>(&raw_json).ok()
+            match serde_json::from_str::<Value>(&raw_json) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    // Not valid JSON (e.g., "No transaction selected")
+                    // Wrap it as text so copy still works
+                    Some(serde_json::json!({ "message": raw_json }))
+                }
+            }
         }
         CopyPane::Details => {
             // Try to parse the details string as JSON
@@ -92,7 +106,7 @@ fn pretty_no_newline(v: &Value) -> String {
 /// Returns the string that would be copied for the current focus, if any.
 ///
 /// This is useful for testing or preview without actually writing to clipboard.
-pub fn current_text(app: &App) -> Option<String> {
+pub fn current_text(app: &mut App) -> Option<String> {
     let pane = focused_pane(app);
     payload_for(app, pane).map(|v| pretty_no_newline(&v))
 }
@@ -117,7 +131,7 @@ pub fn current_text(app: &App) -> Option<String> {
 /// // Just call it - platform.js may show overlay on success
 /// let _ = copy_api::copy_current(&app);
 /// ```
-pub fn copy_current(app: &App) -> bool {
+pub fn copy_current(app: &mut App) -> bool {
     match current_text(app) {
         Some(s) if !s.is_empty() => platform::copy_to_clipboard(&s),
         _ => false,
@@ -132,7 +146,16 @@ mod tests {
     fn test_focused_pane_mapping() {
         // This test assumes App::new() exists with reasonable defaults
         // In practice, we'd need a proper test app setup
-        let app = App::new(30, vec![30], 100, "".to_string(), None);
+        let app = App::new(
+            30,
+            vec![30],
+            100,
+            "".to_string(),
+            None,
+            "https://tx.main.fastnear.com".to_string(),
+            None,
+            None,
+        );
 
         // Default pane should be 0 (Blocks)
         assert_eq!(focused_pane(&app), CopyPane::Blocks);

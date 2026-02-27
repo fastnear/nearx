@@ -1,6 +1,6 @@
 # Chapter 7: Testing & Security
 
-This chapter covers end-to-end testing procedures, OAuth authentication, and security measures implemented in Ratacat.
+This chapter covers end-to-end testing procedures, OAuth authentication, and security measures implemented in NEARx.
 
 ## End-to-End Testing (E2E)
 
@@ -158,7 +158,7 @@ See `.github/workflows/e2e.yml` for GitHub Actions configuration.
 
 ## OAuth & Authentication
 
-Ratacat v0.4.2 introduces production-ready OAuth integration for Web and Tauri targets, enabling secure user authentication with Google OAuth and Magic link providers.
+NEARx v0.4.2 introduces production-ready OAuth integration for Web and Tauri targets, enabling secure user authentication with Google OAuth and Magic link providers.
 
 ### Architecture
 
@@ -262,7 +262,7 @@ cargo tauri dev
 
 ## Security
 
-Ratacat v0.4.2 implements defense-in-depth security with CSP headers, XSS hardening, and secure token handling.
+NEARx v0.4.2 implements defense-in-depth security with CSP headers, XSS hardening, and secure token handling.
 
 ### Content Security Policy (CSP)
 

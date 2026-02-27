@@ -1,11 +1,11 @@
-//! Ratacat - NEAR Blockchain Transaction Viewer
+//! NEARx - NEAR Blockchain Transaction Viewer
 //!
-//! This library provides the core functionality for Ratacat, a high-performance
+//! This library provides the core functionality for NEARx, a high-performance
 //! terminal UI (and web UI) for monitoring NEAR Protocol blockchain transactions.
 //!
 //! ## Architecture
 //!
-//! Ratacat is built to work in two modes:
+//! NEARx is built to work in two modes:
 //! - **Native**: Terminal UI using crossterm and ratatui
 //! - **Web**: DOM-based browser UI with WASM core
 //!
@@ -32,6 +32,7 @@ pub mod types;
 pub mod util_text;
 
 // RPC utilities (same direct JSON-RPC implementation for both native and web)
+pub mod fastnear_api;
 pub mod rpc_utils;
 
 // Theme system (available on all platforms, with platform-specific helpers)
@@ -76,6 +77,9 @@ pub mod archival_fetch;
 #[cfg(target_arch = "wasm32")]
 pub mod archival_fetch_wasm;
 
+#[cfg(target_arch = "wasm32")]
+pub mod tx_details_fetch_wasm;
+
 pub mod source_rpc;
 
 #[cfg(feature = "native")]
@@ -108,7 +112,6 @@ pub mod util;
 // Copy functionality (shared across all targets)
 pub mod copy_api;
 pub mod copy_payload;
-
 
 // Re-export commonly used types
 pub use app::{App, BlockLite, InputMode};

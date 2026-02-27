@@ -157,7 +157,7 @@ impl Plugin for ValidatorMonitorPlugin {
             id: "validator-monitor".to_string(),
             name: "Validator Monitor".to_string(),
             version: "0.1.0".to_string(),
-            author: "Ratacat Team".to_string(),
+            author: "NEARx Team".to_string(),
             description: "Monitors NEAR validator performance and health".to_string(),
             capabilities: vec![
                 Capability::ValidatorTracking,
@@ -282,7 +282,7 @@ impl PluginFactory for ValidatorMonitorFactory {
             id: "validator-monitor".to_string(),
             name: "Validator Monitor".to_string(),
             version: "0.1.0".to_string(),
-            author: "Ratacat Team".to_string(),
+            author: "NEARx Team".to_string(),
             description: "Monitors NEAR validator performance and health".to_string(),
             capabilities: vec![
                 Capability::ValidatorTracking,

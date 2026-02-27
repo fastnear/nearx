@@ -41,15 +41,8 @@ jobs:
       - name: Clippy (native features)
         run: cargo clippy -p nearx -p ref-arb-scanner --features native --all-targets -- -D warnings
 
-      - name: Clippy (web features)
-        run: cargo clippy -p nearx --features dom-web --target wasm32-unknown-unknown -- -D warnings
-
       - name: Test (native)
         run: cargo test --features native --all
-
-      - name: Test (web)
-        run: cargo test -p nearx --features dom-web --target wasm32-unknown-unknown
-        continue-on-error: true  # WASM tests may not all pass yet
 
   native-host-build:
     name: Build Native Host
@@ -89,6 +82,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install workspace dependencies
+        run: yarn install --immutable
 
       - name: Install Tauri dependencies (Linux)
         if: runner.os == 'Linux'
@@ -167,23 +166,26 @@ jobs:
           path: nearx-firefox-extension.zip
 
   web-build:
-    name: Build Web (WASM)
+    name: Build Web (Explorer)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          targets: wasm32-unknown-unknown
+          node-version: 20
 
-      - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --locked
+      - name: Enable Corepack
+        run: corepack enable
 
-      - name: Build web app
-        run: make web-release
+      - name: Install workspace dependencies
+        run: yarn install --immutable
+
+      - name: Build explorer frontend
+        run: yarn workspace explorer-frontend build
 
       - name: Upload web artifacts
         uses: actions/upload-artifact@v4
         with:
           name: web-app
-          path: web/
+          path: web/dist/

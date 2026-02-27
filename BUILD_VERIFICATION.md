@@ -1,104 +1,64 @@
-# Build Verification - Three Targets
+# Build Verification - Active Targets
 
-All three targets verified on: 2025-11-16
+Verified on: 2026-02-27
 
-## 1. Native Terminal Mode ✅
+## 1. Native Terminal Mode
 
 **Binary**: `nearx`
-**Features**: `native`
 
 ```bash
-# Check build
 cargo check --bin nearx --features native
-
-# Run with RPC mode
-cargo run --bin nearx --features native -- --source rpc
+cargo test --bin nearxd
 ```
 
-**Status**: ✅ Compiles successfully
+## 2. Explorer Frontend (React/Vite)
 
----
-
-## 2. Web Browser Mode (DOM) ✅
-
-**Binary**: `nearx-web-dom`
-**Features**: `dom-web` (NO egui dependencies)
-**Build**: `wasm-bindgen` via Makefile
+**Workspace**: `explorer-frontend`
+**Path**: `web/`
 
 ```bash
-# Check build
-cargo check --bin nearx-web-dom --target wasm32-unknown-unknown --no-default-features --features dom-web
-
-# Development server
-make dev
-# Opens at http://localhost:8000
-
-# Production build
-make web-release
-# Output: web/pkg/
+yarn workspace explorer-frontend build
 ```
 
-**Status**: ✅ Compiles successfully (minor unused import warning ok)
+Expected output:
 
----
+- `web/dist/index.html`
+- `web/dist/assets/*`
 
-## 3. Tauri Desktop App Mode ✅
+## 3. Tauri Desktop App (v2)
 
 **Binary**: `nearx-tauri`
-**Frontend**: `web/` directory (DOM-based, NO egui)
-**Config**: `tauri-workspace/src-tauri/tauri.conf.json`
+**Frontend dist**: `../../web/dist`
+**Dev URL**: `http://127.0.0.1:1420`
 
 ```bash
-# Development mode (auto-builds frontend via Makefile)
-cd tauri-workspace
-cargo tauri dev
-
-# Or use the helper script (macOS only)
-./tauri-dev.sh
+cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml
+cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml --features e2e
 ```
 
-**Status**: ✅ Config verified
-- `frontendDist`: `../../web` ✅
-- `withGlobalTauri`: `true` ✅
-- Deep link scheme: `nearx://` ✅
+Key config assertions in `tauri-workspace/src-tauri/tauri.conf.json`:
 
-**Note**: Binary check fails on Linux due to missing GTK system libraries. This is expected - Tauri works correctly on macOS.
+- `beforeDevCommand`: Yarn workspace Vite dev command with `VITE_TAURI=true`
+- `beforeBuildCommand`: Yarn workspace build command with `VITE_TAURI=true`
+- `withGlobalTauri`: `false` (production hardening)
 
----
+In `tauri.conf.test.json`:
 
-## Architecture Verification
+- `withGlobalTauri`: `true` (E2E harness compatibility)
 
-### DOM Build Architecture ✅
+## 4. Yarn Workspace Baseline
 
 ```bash
-# Verify DOM build has NO egui dependencies
-cargo tree --target wasm32-unknown-unknown --no-default-features --features dom-web \
-  | grep -E '(egui|eframe)'
-# → Should return empty
+yarn --version
+yarn install
 ```
 
-### Current Architecture
+Expected:
 
-- **`dom-web`**: Pure DOM, wasm-bindgen only
-  - Binary: `nearx-web-dom`
-  - Build: Direct wasm-bindgen via Makefile
-  - Output: `web/pkg/`
-
-### Build System: wasm-bindgen (Direct) ✅
-
-- No bundler needed for our simple static site
-- Makefile handles wasm-bindgen directly
-- Serves both web and Tauri targets
-- Maximum control and simplicity
-
----
+- Yarn Berry 4.x
+- single root `yarn.lock`
+- no active `package-lock.json`
 
 ## Summary
 
-All three targets build correctly and are properly separated:
-
-1. ✅ Native terminal uses `native` features
-2. ✅ DOM web uses `dom-web` features (no egui)
-3. ✅ Tauri loads from `dist-dom/` (DOM, not egui)
-
-The "big shift" from egui to DOM is complete and verified!
+Active web runtime is now the explorer frontend under `web/`; legacy `nearx-web-dom` implementation is archived under `archive/legacy-web-dom/`.

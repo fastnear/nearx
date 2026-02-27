@@ -3,6 +3,10 @@
   "version": "0.4.0",
   "private": true,
   "description": "NEARx - NEAR Blockchain Explorer (Web E2E Tests)",
+  "workspaces": [
+    "web",
+    "e2e-tests"
+  ],
   "scripts": {
     "e2e:install": "npx playwright install --with-deps",
     "e2e": "playwright test",
@@ -12,5 +16,9 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.49.2"
+  },
+  "packageManager": "yarn@4.12.0",
+  "engines": {
+    "node": ">=20 <21"
   }
 }

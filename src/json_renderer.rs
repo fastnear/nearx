@@ -24,11 +24,11 @@ impl JsonPalette {
         // TEMPORARY: Force ANSI colors since they work
         JsonPalette {
             key: Color::Cyan,        // Cyan for keys
-            string: Color::Green,     // Green for strings
-            number: Color::Yellow,    // Yellow/Orange for numbers
-            boolean: Color::Magenta,  // Magenta for booleans (more visible)
-            null: Color::Blue,        // Blue for null
-            structure: Color::White,   // White for structure (more visible)
+            string: Color::Green,    // Green for strings
+            number: Color::Yellow,   // Yellow/Orange for numbers
+            boolean: Color::Magenta, // Magenta for booleans (more visible)
+            null: Color::Blue,       // Blue for null
+            structure: Color::White, // White for structure (more visible)
         }
     }
 }
@@ -62,7 +62,6 @@ fn supports_true_color() -> bool {
 /// Render a JSON value with syntax highlighting
 pub fn render_json(value: &Value, theme: &Theme) -> Vec<Line<'static>> {
     let palette = JsonPalette::from_theme(theme);
-
 
     let mut lines = Vec::new();
     render_value(value, 0, &mut lines, &palette, false);
@@ -136,19 +135,14 @@ fn render_object(
     inline: bool,
 ) {
     if map.is_empty() {
-        // Empty object
-        let spans = vec![
-            Span::styled("{", Style::default().fg(palette.structure)),
-            Span::styled("}", Style::default().fg(palette.structure)),
-        ];
+        // Empty object should render as a single "{}" token.
+        let span = Span::styled("{}", Style::default().fg(palette.structure));
         if inline {
             if let Some(last_line) = lines.last_mut() {
-                last_line.spans.extend(spans);
+                last_line.spans.push(span);
             }
         } else {
-            let mut line = vec![indent_span(indent)];
-            line.extend(spans);
-            lines.push(Line::from(line));
+            lines.push(Line::from(vec![indent_span(indent), span]));
         }
         return;
     }
@@ -156,7 +150,9 @@ fn render_object(
     // Opening brace
     if inline {
         if let Some(last_line) = lines.last_mut() {
-            last_line.spans.push(Span::styled("{", Style::default().fg(palette.structure)));
+            last_line
+                .spans
+                .push(Span::styled("{", Style::default().fg(palette.structure)));
         }
     } else {
         lines.push(Line::from(vec![
@@ -186,18 +182,22 @@ fn render_object(
             // Add comma if not last
             if i < len - 1 {
                 if let Some(last_line) = lines.last_mut() {
-                    last_line.spans.push(Span::styled(",", Style::default().fg(palette.structure)));
+                    last_line
+                        .spans
+                        .push(Span::styled(",", Style::default().fg(palette.structure)));
                 }
             }
         } else {
-            // Complex value on new line
+            // Keep complex open delimiters inline with the key context.
             lines.push(Line::from(entry_spans));
-            render_value(value, indent + 2, lines, palette, false);
+            render_value(value, indent + 2, lines, palette, true);
 
             // Add comma if not last
             if i < len - 1 {
                 if let Some(last_line) = lines.last_mut() {
-                    last_line.spans.push(Span::styled(",", Style::default().fg(palette.structure)));
+                    last_line
+                        .spans
+                        .push(Span::styled(",", Style::default().fg(palette.structure)));
                 }
             }
         }
@@ -219,19 +219,14 @@ fn render_array(
     inline: bool,
 ) {
     if arr.is_empty() {
-        // Empty array
-        let spans = vec![
-            Span::styled("[", Style::default().fg(palette.structure)),
-            Span::styled("]", Style::default().fg(palette.structure)),
-        ];
+        // Empty array should render as a single "[]" token.
+        let span = Span::styled("[]", Style::default().fg(palette.structure));
         if inline {
             if let Some(last_line) = lines.last_mut() {
-                last_line.spans.extend(spans);
+                last_line.spans.push(span);
             }
         } else {
-            let mut line = vec![indent_span(indent)];
-            line.extend(spans);
-            lines.push(Line::from(line));
+            lines.push(Line::from(vec![indent_span(indent), span]));
         }
         return;
     }
@@ -242,26 +237,34 @@ fn render_array(
     if can_inline && inline {
         // Render as [val1, val2, val3]
         if let Some(last_line) = lines.last_mut() {
-            last_line.spans.push(Span::styled("[", Style::default().fg(palette.structure)));
+            last_line
+                .spans
+                .push(Span::styled("[", Style::default().fg(palette.structure)));
         }
 
         for (i, value) in arr.iter().enumerate() {
             render_value(value, 0, lines, palette, true);
             if i < arr.len() - 1 {
                 if let Some(last_line) = lines.last_mut() {
-                    last_line.spans.push(Span::styled(", ", Style::default().fg(palette.structure)));
+                    last_line
+                        .spans
+                        .push(Span::styled(", ", Style::default().fg(palette.structure)));
                 }
             }
         }
 
         if let Some(last_line) = lines.last_mut() {
-            last_line.spans.push(Span::styled("]", Style::default().fg(palette.structure)));
+            last_line
+                .spans
+                .push(Span::styled("]", Style::default().fg(palette.structure)));
         }
     } else {
         // Multi-line array
         if inline {
             if let Some(last_line) = lines.last_mut() {
-                last_line.spans.push(Span::styled("[", Style::default().fg(palette.structure)));
+                last_line
+                    .spans
+                    .push(Span::styled("[", Style::default().fg(palette.structure)));
             }
         } else {
             lines.push(Line::from(vec![
@@ -285,7 +288,9 @@ fn render_array(
             // Add comma if not last
             if i < arr.len() - 1 {
                 if let Some(last_line) = lines.last_mut() {
-                    last_line.spans.push(Span::styled(",", Style::default().fg(palette.structure)));
+                    last_line
+                        .spans
+                        .push(Span::styled(",", Style::default().fg(palette.structure)));
                 }
             }
         }
@@ -304,7 +309,7 @@ fn is_simple_value(value: &Value) -> bool {
         Value::String(s) => s.len() < 50, // Short strings only
         Value::Number(_) | Value::Bool(_) | Value::Null => true,
         Value::Object(map) => map.is_empty(), // Empty objects
-        Value::Array(arr) => arr.is_empty(), // Empty arrays
+        Value::Array(arr) => arr.is_empty(),  // Empty arrays
     }
 }
 
@@ -384,8 +389,8 @@ mod tests {
         let lines = render_json(&json, &theme);
 
         // Empty containers should be inline: {}  and []
-        assert!(lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.content.contains("{}"))
-        }));
+        assert!(lines
+            .iter()
+            .any(|line| { line.spans.iter().any(|span| span.content.contains("{}")) }));
     }
 }

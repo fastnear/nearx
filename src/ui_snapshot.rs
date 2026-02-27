@@ -3,16 +3,16 @@ use serde::{Deserialize, Serialize};
 use crate::{App, InputMode};
 
 /// Block source type for two-list architecture
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiBlockSource {
-    Forward,           // Live/cached block from forward list
-    BackfillPending,   // Backfill slot queued but not yet fetched
-    BackfillLoading,   // Backfill slot currently being fetched
+    Forward,         // Live/cached block from forward list
+    BackfillPending, // Backfill slot queued but not yet fetched
+    BackfillLoading, // Backfill slot currently being fetched
 }
 
 /// One row in the Blocks pane (filtered view).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiBlockRow {
     pub index: usize,
     pub height: u64,
@@ -21,11 +21,11 @@ pub struct UiBlockRow {
     pub tx_count: usize,
     pub available: bool,
     pub is_selected: bool,
-    pub source: UiBlockSource,  // NEW: tracks whether forward or backfill
+    pub source: UiBlockSource, // NEW: tracks whether forward or backfill
 }
 
 /// One row in the Transactions pane (filtered view).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiTxRow {
     pub index: usize,
     pub hash: String,
@@ -35,7 +35,7 @@ pub struct UiTxRow {
 }
 
 /// DOM-/JSON-/TUI-friendly snapshot of `App` state (Rust → UI).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSnapshot {
     /// 0 = Blocks, 1 = Txs, 2 = Details
     pub pane: usize,
@@ -52,7 +52,7 @@ pub struct UiSnapshot {
     /// Blocks pane rows (filtered + backfill combined).
     pub blocks: Vec<UiBlockRow>,
     pub blocks_total: usize,
-    pub blocks_scroll_offset: usize,  // NEW: for vertical centering
+    pub blocks_scroll_offset: usize, // NEW: for vertical centering
     pub selected_block_height: Option<u64>,
     pub viewing_cached: bool,
 
@@ -62,12 +62,12 @@ pub struct UiSnapshot {
 
     /// Details pane (windowed JSON for performance)
     pub details: String,
-    pub details_scroll: u16,      // Legacy field (line-based now)
+    pub details_scroll: u16,        // Legacy field (line-based now)
     pub details_scroll_line: usize, // Current scroll line (0-based)
     pub details_total_lines: usize, // Total lines in buffer
-    pub details_truncated: bool,  // Whether content was truncated at MAX_LINES
+    pub details_truncated: bool,    // Whether content was truncated at MAX_LINES
     pub details_fullscreen: bool,
-    pub fullscreen_mode: String, // "Scroll" or "Navigate"
+    pub fullscreen_mode: String,         // "Scroll" or "Navigate"
     pub fullscreen_content_type: String, // "BlockRawJson", "TransactionRawJson", or "ParsedDetails"
 
     /// Toast notification text (if any).
@@ -116,13 +116,13 @@ impl UiSnapshot {
             let is_loading = loading_block == Some(slot.height);
 
             blocks.push(UiBlockRow {
-                index: blocks.len(),  // Continue index sequence
+                index: blocks.len(), // Continue index sequence
                 height: slot.height,
                 hash: slot.hash.clone(),
                 when: String::new(),
                 tx_count: 0,
                 available: false,
-                is_selected: false,  // Placeholders never selected
+                is_selected: false, // Placeholders never selected
                 source: if is_loading {
                     UiBlockSource::BackfillLoading
                 } else {
@@ -132,7 +132,7 @@ impl UiSnapshot {
         }
 
         // Compute scroll offset for vertical centering (like TUI ui.rs:439)
-        let viewport_rows = 24;  // Reasonable default for web viewport
+        let viewport_rows = 24; // Reasonable default for web viewport
         let total_rows = blocks.len();
         let mut blocks_scroll_offset = 0;
 
@@ -175,7 +175,9 @@ impl UiSnapshot {
         };
         let fullscreen_content_type = match app.fullscreen_content_type() {
             crate::app::FullscreenContentType::BlockRawJson => "BlockRawJson".to_string(),
-            crate::app::FullscreenContentType::TransactionRawJson => "TransactionRawJson".to_string(),
+            crate::app::FullscreenContentType::TransactionRawJson => {
+                "TransactionRawJson".to_string()
+            }
             crate::app::FullscreenContentType::ParsedDetails => "ParsedDetails".to_string(),
         };
         let toast = app.toast_message().map(|s| s.to_string());
@@ -209,12 +211,32 @@ impl UiSnapshot {
             loading_block,
         }
     }
+
+    /// Serialize to MessagePack binary format (3-5x faster than JSON).
+    ///
+    /// Returns the binary-encoded snapshot for efficient transfer to web frontend.
+    /// Falls back to empty vec on serialization error (should never happen).
+    #[cfg(feature = "dom-web")]
+    pub fn to_msgpack(&self) -> Vec<u8> {
+        rmp_serde::to_vec(self).unwrap_or_else(|e| {
+            log::error!("Failed to serialize UiSnapshot to MessagePack: {e}");
+            Vec::new()
+        })
+    }
+
+    /// Deserialize from MessagePack binary format.
+    ///
+    /// For debugging/testing - normally we only serialize snapshots (Rust → JS).
+    #[cfg(feature = "dom-web")]
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes)
+    }
 }
 
 /// Frontend-agnostic high-level UI actions (UI → Rust).
 ///
 /// These are what TUI/web/Tauri frontends should send into the core.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum UiAction {
     /// Update the filter query (applied immediately).
@@ -246,6 +268,23 @@ pub enum UiAction {
 
     /// Copy JSON / focused data (pane-aware).
     CopyFocusedJson,
+}
+
+impl UiAction {
+    /// Deserialize from MessagePack binary format.
+    #[cfg(feature = "dom-web")]
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes)
+    }
+
+    /// Serialize to MessagePack binary format (for testing).
+    #[cfg(feature = "dom-web")]
+    pub fn to_msgpack(&self) -> Vec<u8> {
+        rmp_serde::to_vec(self).unwrap_or_else(|e| {
+            log::error!("Failed to serialize UiAction to MessagePack: {e}");
+            Vec::new()
+        })
+    }
 }
 
 /// Apply a UI action to the core `App`.

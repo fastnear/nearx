@@ -14,7 +14,6 @@
     "mocha": "^11.7.1",
     "selenium-webdriver": "^4.34.0"
   },
-  "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }

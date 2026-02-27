@@ -4,13 +4,13 @@
   "version": "0.4.0",
   "identifier": "com.fastnear.nearx",
   "build": {
-    "beforeDevCommand": "make -C .. dev",
-    "beforeBuildCommand": "make -C .. web",
-    "devUrl": "http://localhost:8000",
-    "frontendDist": "../../web"
+    "beforeDevCommand": "VITE_TAURI=true yarn --cwd .. workspace explorer-frontend dev --host 127.0.0.1 --port 1420 --strictPort",
+    "beforeBuildCommand": "VITE_TAURI=true yarn --cwd .. workspace explorer-frontend build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../../web/dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",

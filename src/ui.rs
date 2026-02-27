@@ -6,8 +6,7 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
-        Wrap,
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
     },
     Frame,
 };
@@ -454,7 +453,11 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, app: &App) {
     let blocks_title = if app.is_viewing_cached_block() {
         " Blocks (cached) — (↑↓ nav • ← recent) ".to_string()
     } else if filtered_blocks.len() < total {
-        format!(" Blocks ({} / {}) — (↑↓ nav • Enter select) ", filtered_blocks.len(), total)
+        format!(
+            " Blocks ({} / {}) — (↑↓ nav • Enter select) ",
+            filtered_blocks.len(),
+            total
+        )
     } else {
         " Blocks — (↑↓ nav • Enter select) ".to_string()
     };
@@ -476,8 +479,8 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(side_block, chunks[0]);
 
     // Second pass: top border with title
-    let title_widget = Paragraph::new("")
-        .block(
+    let title_widget =
+        Paragraph::new("").block(
             Block::default()
                 .title(if blocks_focused {
                     blocks_title.yellow().bold()
@@ -490,15 +493,13 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     BorderType::Rounded
                 })
-                .border_style(
-                    Style::default()
-                        .fg(top_border_color)
-                        .add_modifier(if blocks_focused {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
+                .border_style(Style::default().fg(top_border_color).add_modifier(
+                    if blocks_focused {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    },
+                )),
         );
     f.render_widget(title_widget, chunks[0]);
 
@@ -513,17 +514,17 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, app: &App) {
     // Content with padding (no borders, rendered on top)
     let slot_text = app.selection_slot_text();
     let slot_widget = Paragraph::new(slot_text)
-        .style(Style::default().fg(get_accent_strong()).add_modifier(Modifier::BOLD))
-        .block(
-            Block::default()
-                .borders(Borders::NONE)
-                .padding(Padding {
-                    left: 1,
-                    right: 1,
-                    top: 0,
-                    bottom: 0,
-                }),
-        );
+        .style(
+            Style::default()
+                .fg(get_accent_strong())
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::NONE).padding(Padding {
+            left: 1,
+            right: 1,
+            top: 0,
+            bottom: 0,
+        }));
     f.render_widget(slot_widget, chunks[1]);
 
     // Render blocks list at chunks[2]
@@ -538,16 +539,12 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, app: &App) {
     let blocks_widget = List::new(items_blocks)
         .highlight_style(get_sel_style().add_modifier(Modifier::BOLD))
         .highlight_symbol("• ")
-        .block(
-            Block::default()
-                .borders(Borders::NONE)
-                .padding(Padding {
-                    left: 1,
-                    right: 1,
-                    top: 0,
-                    bottom: 0,
-                }),
-        );
+        .block(Block::default().borders(Borders::NONE).padding(Padding {
+            left: 1,
+            right: 1,
+            top: 0,
+            bottom: 0,
+        }));
 
     f.render_stateful_widget(blocks_widget, chunks[2], &mut st_blocks);
 }
@@ -590,7 +587,11 @@ fn render_txs_pane(f: &mut Frame, area: Rect, app: &App) {
 
     let title = if txs.len() < total {
         // Show filtered count when filter is hiding some transactions
-        format!(" Txs ({} / {}) — (↑↓ nav • Enter select) ", txs.len(), total)
+        format!(
+            " Txs ({} / {}) — (↑↓ nav • Enter select) ",
+            txs.len(),
+            total
+        )
     } else {
         format!(" Txs ({}) — (↑↓ nav • Enter select) ", txs.len())
     };
@@ -611,38 +612,37 @@ fn render_txs_pane(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(side_block, area);
 
     // Second pass: top border and content
-    let tx_widget = List::new(tx_items)
-        .highlight_style(get_sel_style().add_modifier(Modifier::BOLD))
-        .highlight_symbol("• ")
-        .block(
-            Block::default()
-                .title(if txs_focused {
-                    title.yellow().bold()
-                } else {
-                    title.into()
-                })
-                .borders(Borders::TOP)
-                .border_type(if txs_focused {
-                    BorderType::QuadrantOutside
-                } else {
-                    BorderType::Rounded
-                })
-                .border_style(
-                    Style::default()
-                        .fg(top_border_color)
-                        .add_modifier(if txs_focused {
+    let tx_widget =
+        List::new(tx_items)
+            .highlight_style(get_sel_style().add_modifier(Modifier::BOLD))
+            .highlight_symbol("• ")
+            .block(
+                Block::default()
+                    .title(if txs_focused {
+                        title.yellow().bold()
+                    } else {
+                        title.into()
+                    })
+                    .borders(Borders::TOP)
+                    .border_type(if txs_focused {
+                        BorderType::QuadrantOutside
+                    } else {
+                        BorderType::Rounded
+                    })
+                    .border_style(Style::default().fg(top_border_color).add_modifier(
+                        if txs_focused {
                             Modifier::BOLD
                         } else {
                             Modifier::empty()
-                        }),
-                )
-                .padding(Padding {
-                    left: 1,
-                    right: 1,
-                    top: 0,
-                    bottom: 0,
-                }),
-        );
+                        },
+                    ))
+                    .padding(Padding {
+                        left: 1,
+                        right: 1,
+                        top: 0,
+                        bottom: 0,
+                    }),
+            );
 
     f.render_stateful_widget(tx_widget, area, &mut st_txs);
 }
@@ -659,7 +659,8 @@ fn render_details_pane(f: &mut Frame, area: Rect, app: &mut App) {
     // csli-style background fill (focused = panel_alt, unfocused = panel)
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new("").style(Style::default().bg(get_panel(PaneKind::Details, details_focused))),
+        Paragraph::new("")
+            .style(Style::default().bg(get_panel(PaneKind::Details, details_focused))),
         area,
     );
 
@@ -699,11 +700,17 @@ fn render_details_pane(f: &mut Frame, area: Rect, app: &mut App) {
                     format!(" Transaction Raw JSON{} — {} • ('c' to copy • Tab toggle scroll • spacebar exits fullscreen) ", scroll_indicator, mode_indicator)
                 }
                 crate::app::FullscreenContentType::ParsedDetails => {
-                    format!(" Transaction Details{} — ('c' to copy • spacebar exits fullscreen) ", scroll_indicator)
+                    format!(
+                        " Transaction Details{} — ('c' to copy • spacebar exits fullscreen) ",
+                        scroll_indicator
+                    )
                 }
             }
         } else {
-            format!(" Transaction Details{} — ('c' to copy • spacebar for fullscreen) ", scroll_indicator)
+            format!(
+                " Transaction Details{} — ('c' to copy • spacebar for fullscreen) ",
+                scroll_indicator
+            )
         }
     } else {
         format!(" Transaction Details{} ", scroll_indicator)
@@ -720,7 +727,6 @@ fn render_details_pane(f: &mut Frame, area: Rect, app: &mut App) {
     let trimmed = details_text.trim();
     let is_json = trimmed.starts_with('{') || trimmed.starts_with('[');
 
-
     let mut colored_lines = if is_json {
         // Use character-based colorizer with ANSI colors
         crate::json_syntax::colorize_json(&details_text, theme)
@@ -736,43 +742,42 @@ fn render_details_pane(f: &mut Frame, area: Rect, app: &mut App) {
     if app.details_truncated() {
         colored_lines.push(Line::from(""));
         colored_lines.push(Line::from(""));
-        colored_lines.push(Line::from(vec![
-            Span::styled(
-                "… large output truncated at 5000 lines; press 'c' to copy full JSON",
-                Style::default().fg(get_accent()).add_modifier(Modifier::DIM)
-            )
-        ]));
+        colored_lines.push(Line::from(vec![Span::styled(
+            "… large output truncated at 5000 lines; press 'c' to copy full JSON",
+            Style::default()
+                .fg(get_accent())
+                .add_modifier(Modifier::DIM),
+        )]));
     }
 
-    let details_widget = Paragraph::new(colored_lines)
-        .style(Style::default()) // Explicitly set no style to preserve span colors
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0)) // Windowed rendering - no scroll offset needed
-        .block({
-            Block::default()
-                .title(title)
-                .borders(Borders::TOP)
-                .border_type(if details_focused {
-                    BorderType::QuadrantOutside
-                } else {
-                    BorderType::Rounded
-                })
-                .border_style(
-                    Style::default()
-                        .fg(border_color)
-                        .add_modifier(if details_focused {
+    let details_widget =
+        Paragraph::new(colored_lines)
+            .style(Style::default()) // Explicitly set no style to preserve span colors
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0)) // Windowed rendering - no scroll offset needed
+            .block({
+                Block::default()
+                    .title(title)
+                    .borders(Borders::TOP)
+                    .border_type(if details_focused {
+                        BorderType::QuadrantOutside
+                    } else {
+                        BorderType::Rounded
+                    })
+                    .border_style(Style::default().fg(border_color).add_modifier(
+                        if details_focused {
                             Modifier::BOLD
                         } else {
                             Modifier::empty()
-                        }),
-                )
-                .padding(Padding {
-                    left: 0,
-                    right: 0,
-                    top: 1,
-                    bottom: 0,
-                })
-        });
+                        },
+                    ))
+                    .padding(Padding {
+                        left: 0,
+                        right: 0,
+                        top: 1,
+                        bottom: 0,
+                    })
+            });
 
     f.render_widget(details_widget, area);
 }
@@ -1105,4 +1110,3 @@ fn truncate_account(account: &str, max_len: usize) -> String {
     }
     format!("{}...", &account[..max_len.saturating_sub(3)])
 }
-

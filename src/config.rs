@@ -53,13 +53,22 @@ pub struct CliArgs {
     #[arg(long, env = "NEAR_NODE_URL")]
     pub near_node_url: Option<String>,
 
-    /// FastNEAR authentication token (recommended to avoid rate limits)
-    #[arg(long, env = "FASTNEAR_AUTH_TOKEN")]
+    /// FastNEAR API key (recommended to avoid rate limits)
+    /// Env priority: FASTNEAR_API_KEY, then FASTNEAR_AUTH_TOKEN (legacy)
+    #[arg(
+        long = "fastnear-auth-token",
+        visible_alias = "fastnear-api-key",
+        env = "FASTNEAR_AUTH_TOKEN"
+    )]
     pub fastnear_auth_token: Option<String>,
 
     /// Archival RPC endpoint URL for fetching historical blocks
     #[arg(long, env = "ARCHIVAL_RPC_URL")]
     pub archival_rpc_url: Option<String>,
+
+    /// FastNEAR Explorer API endpoint URL for fetching full transaction details
+    #[arg(long, env = "FASTNEAR_API_URL")]
+    pub fastnear_api_url: Option<String>,
 
     /// RPC polling interval in milliseconds (100-10000)
     #[arg(long, env = "POLL_INTERVAL_MS")]
@@ -125,6 +134,7 @@ pub struct Config {
     pub near_node_url: String,
     pub near_node_url_explicit: bool, // true if set via env var or CLI
     pub archival_rpc_url: Option<String>,
+    pub fastnear_api_url: String,
     pub rpc_timeout_ms: u64,
     #[allow(dead_code)]
     pub rpc_retries: u32,
@@ -183,6 +193,12 @@ pub fn load() -> Result<Config> {
     if let Some(ref url) = archival_rpc_url {
         validate_url(url, "ARCHIVAL_RPC_URL")?;
     }
+
+    let fastnear_api_url = args
+        .fastnear_api_url
+        .or_else(|| env::var("FASTNEAR_API_URL").ok())
+        .unwrap_or_else(|| "https://tx.main.fastnear.com".to_string());
+    validate_url(&fastnear_api_url, "FASTNEAR_API_URL")?;
 
     let ws_url = args
         .ws_url
@@ -309,12 +325,10 @@ pub fn load() -> Result<Config> {
         near_node_url,
         near_node_url_explicit,
         archival_rpc_url,
+        fastnear_api_url,
         rpc_timeout_ms,
         rpc_retries,
-        fastnear_auth_token: args.fastnear_auth_token.or_else(|| {
-            let token = fastnear_token();
-            if token.is_empty() { None } else { Some(token) }
-        }),
+        fastnear_auth_token: args.fastnear_auth_token.or_else(fastnear_env_token),
         default_filter,
         theme,
     })
@@ -340,29 +354,57 @@ fn validate_url(url: &str, name: &str) -> Result<()> {
     }
 }
 
-/// Cross-target FastNEAR token resolution.
+/// Cross-target FastNEAR key resolution.
+/// Priority: FASTNEAR_API_KEY (canonical) -> FASTNEAR_AUTH_TOKEN (legacy alias).
 /// Avoids runtime env reads on WASM (which cause panics).
-pub fn fastnear_token() -> String {
+pub fn fastnear_env_token() -> Option<String> {
     // Native & proxy: read at runtime.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::env::var("FASTNEAR_AUTH_TOKEN").unwrap_or_default()
+        let api_key = std::env::var("FASTNEAR_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if api_key.is_some() {
+            return api_key;
+        }
+
+        std::env::var("FASTNEAR_AUTH_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     // Web/Tauri (wasm): bake token at compile time if available.
     #[cfg(target_arch = "wasm32")]
     {
-        option_env!("FASTNEAR_API_TOKEN_WEB")
-            .unwrap_or("")
-            .to_string()
+        option_env!("FASTNEAR_API_KEY")
+            .or(option_env!("FASTNEAR_AUTH_TOKEN"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
+}
+
+/// Cross-target helper returning empty string when no key is configured.
+pub fn fastnear_token() -> String {
+    fastnear_env_token().unwrap_or_default()
+}
+
+/// Append FastNEAR API key as a query parameter in the documented form.
+pub fn with_fastnear_api_key(url: &str, key: Option<&str>) -> String {
+    let Some(key) = key.map(str::trim).filter(|s| !s.is_empty()) else {
+        return url.to_string();
+    };
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}apiKey={}", urlencoding::encode(key))
 }
 
 /// Print current configuration (useful for debugging)
 impl Config {
     #[allow(dead_code)]
     pub fn print_summary(&self) {
-        eprintln!("Ratacat Configuration:");
+        eprintln!("NEARx Configuration:");
         eprintln!("  Source: {}", self.source);
         match self.source {
             Source::Ws => {

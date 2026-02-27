@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let rpc_url = std::env::var("NEAR_NODE_URL")
         .unwrap_or_else(|_| "https://rpc.mainnet.fastnear.com/".to_string());
 
-    let auth_token = std::env::var("FASTNEAR_AUTH_TOKEN").ok();
+    let auth_token = nearx::config::fastnear_env_token();
 
     let timeout_ms = std::env::var("RPC_TIMEOUT_MS")
         .ok()
@@ -90,10 +90,10 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3030);
 
-    log::info!("🦀 Ratacat Proxy Server");
+    log::info!("🦀 NEARx Proxy Server");
     log::info!("NEAR RPC: {}", rpc_url);
     log::info!(
-        "Auth token: {}",
+        "API key: {}",
         if auth_token.is_some() {
             "configured"
         } else {
@@ -160,17 +160,13 @@ async fn rpc_proxy_handler(
     // Create HTTP client
     let client = reqwest::Client::new();
 
-    // Build request with auth token
-    let mut req = client
-        .post(&state.rpc_url)
+    // Build request with optional FastNEAR apiKey query parameter
+    let request_url =
+        nearx::config::with_fastnear_api_key(&state.rpc_url, state.auth_token.as_deref());
+    let req = client
+        .post(&request_url)
         .header("Content-Type", "application/json")
         .body(body);
-
-    // Auto-inject auth token from env
-    if let Some(ref token) = state.auth_token {
-        log::debug!("Adding Authorization header with token from env");
-        req = req.header("Authorization", format!("Bearer {}", token));
-    }
 
     // Forward request to NEAR RPC
     let resp = req.send().await.map_err(|e| {
@@ -209,7 +205,9 @@ async fn get_latest_handler(
     // Create a simple HTTP client to query finality=final
     let client = reqwest::Client::new();
 
-    let mut req = client.post(&state.rpc_url).json(&serde_json::json!({
+    let request_url =
+        nearx::config::with_fastnear_api_key(&state.rpc_url, state.auth_token.as_deref());
+    let req = client.post(&request_url).json(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": "latest",
         "method": "block",
@@ -217,11 +215,6 @@ async fn get_latest_handler(
             "finality": "final"
         }
     }));
-
-    // Add auth token if configured
-    if let Some(ref token) = state.auth_token {
-        req = req.header("Authorization", format!("Bearer {}", token));
-    }
 
     let resp = req.send().await.map_err(|e| {
         log::error!("Failed to fetch latest block: {}", e);

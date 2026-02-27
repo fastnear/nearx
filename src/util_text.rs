@@ -109,7 +109,10 @@ where
 
 /// Serialize Option<u64> as string for JavaScript compatibility
 #[cfg(target_arch = "wasm32")]
-pub fn serialize_option_u64_as_string<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_option_u64_as_string<S>(
+    value: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {

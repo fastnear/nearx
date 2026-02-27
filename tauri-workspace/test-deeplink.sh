@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test script to trigger NEAR deep links
 
-echo "Testing Ratacat NEAR deep links..."
+echo "Testing NEARx NEAR deep links..."
 echo ""
 echo "Opening test deep links in 3 seconds..."
 sleep 3

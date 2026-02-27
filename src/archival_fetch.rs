@@ -56,7 +56,8 @@ pub async fn run_archival_fetch(
             Ok(block) => {
                 log::info!(
                     "[Archival] Successfully fetched block #{} ({} txs)",
-                    height, block.tx_count
+                    height,
+                    block.tx_count
                 );
                 // Send block via existing event channel
                 if let Err(e) = block_tx.send(AppEvent::NewBlock(block)) {
