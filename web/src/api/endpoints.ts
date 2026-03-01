@@ -1,4 +1,4 @@
-import { fetchApi } from "./client";
+import { fetchApi, type FetchApiOptions } from "./client";
 import type {
   BlocksResponse,
   BlockDetailResponse,
@@ -8,9 +8,10 @@ import type {
 } from "./types";
 
 export function getBlocks(
-  params: { limit?: number; desc?: boolean; to_block_height?: number; from_block_height?: number } = {}
+  params: { limit?: number; desc?: boolean; to_block_height?: number; from_block_height?: number } = {},
+  options?: FetchApiOptions,
 ): Promise<BlocksResponse> {
-  return fetchApi<BlocksResponse>("blocks", params);
+  return fetchApi<BlocksResponse>("blocks", params, options);
 }
 
 export function getBlock(
@@ -21,11 +22,12 @@ export function getBlock(
 }
 
 export function getTransactions(
-  txHashes: string[]
+  txHashes: string[],
+  options?: FetchApiOptions,
 ): Promise<TransactionsResponse> {
   return fetchApi<TransactionsResponse>("transactions", {
     tx_hashes: txHashes,
-  });
+  }, options);
 }
 
 export function getAccount(

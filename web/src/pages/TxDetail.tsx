@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useLocation, Link } from "react-router-dom";
 import { getTransactions } from "../api/endpoints";
 import type { TransactionDetail } from "../api/types";
@@ -14,6 +14,8 @@ import TransferSummary, { NftTransferSummary } from "../components/TransferSumma
 import ReceiptCard from "../components/ReceiptCard";
 import { CircleCheck, CircleX, Clock, Radio } from "lucide-react";
 
+const PENDING_TX_REFRESH_INTERVAL_MS = 999;
+
 export default function TxDetail() {
   const { txHash } = useParams<{ txHash: string }>();
   const { hash } = useLocation();
@@ -21,19 +23,65 @@ export default function TxDetail() {
   const [error, setError] = useState<string | null>(null);
   const scrolledRef = useRef(false);
 
-  useEffect(() => {
-    if (!txHash) return;
-    scrolledRef.current = false;
-    getTransactions([txHash])
-      .then((data) => {
+  const fetchTx = useCallback(
+    async (opts?: { bypassCache?: boolean }) => {
+      if (!txHash) {
+        return;
+      }
+
+      try {
+        const data = await getTransactions([txHash], {
+          bypassCache: opts?.bypassCache ?? false,
+        });
+
         if (data.transactions.length > 0) {
           setTx(data.transactions[0]);
+          setError(null);
         } else {
           setError("Transaction not found");
         }
-      })
-      .catch((err) => setError(String(err)));
-  }, [txHash]);
+      } catch (err) {
+        setError(String(err));
+      }
+    },
+    [txHash],
+  );
+
+  useEffect(() => {
+    if (!txHash) return;
+    scrolledRef.current = false;
+    void fetchTx({ bypassCache: true });
+  }, [txHash, fetchTx]);
+
+  const parsed = useMemo(() => (tx ? parseTransaction(tx) : null), [tx]);
+
+  useEffect(() => {
+    if (!txHash || !parsed || parsed.is_success !== null) {
+      return;
+    }
+
+    const poll = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      void fetchTx({ bypassCache: true });
+    };
+
+    const intervalId = window.setInterval(poll, PENDING_TX_REFRESH_INTERVAL_MS);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void fetchTx({ bypassCache: true });
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [txHash, parsed?.is_success, fetchTx]);
 
   // Scroll to anchor after tx loads (elements don't exist during initial load)
   useEffect(() => {
@@ -48,7 +96,9 @@ export default function TxDetail() {
   if (error) return <p className="text-red-600">{error}</p>;
   if (!tx) return <p className="text-gray-500">Loading transaction...</p>;
 
-  const parsed = parseTransaction(tx);
+  const parsedTx = parsed;
+  if (!parsedTx) return <p className="text-gray-500">Loading transaction...</p>;
+
   const allWidgets = getMatchingWidgets(tx);
   const explanationWidgets = allWidgets.filter((w) => w.type === "explanation");
   const utilityWidgets = allWidgets.filter((w) => w.type === "utility");
@@ -74,9 +124,9 @@ export default function TxDetail() {
                 <TransactionHash hash={tx.transaction.hash} truncate={false} />
               </span>
               <span className="flex shrink-0 items-center gap-1">
-                {parsed.is_success === null ? (
+                {parsedTx.is_success === null ? (
                   <Clock className="size-3.5 text-yellow-500" />
-                ) : parsed.is_success ? (
+                ) : parsedTx.is_success ? (
                   <CircleCheck className="size-3.5 text-green-600" />
                 ) : (
                   <CircleX className="size-3.5 text-red-600" />
@@ -87,21 +137,21 @@ export default function TxDetail() {
           <div>
             <dt className="shrink-0 text-gray-500">Signer</dt>
             <dd className="flex items-center gap-1">
-              {parsed.relayer_id && (
+              {parsedTx.relayer_id && (
                 <Link
-                  to={`/account/${parsed.relayer_id}`}
-                  title={`Relayed by ${parsed.relayer_id}`}
+                  to={`/account/${parsedTx.relayer_id}`}
+                  title={`Relayed by ${parsedTx.relayer_id}`}
                 >
                   <Radio className="size-3.5 text-red-500" />
                 </Link>
               )}
-              <AccountId accountId={parsed.signer_id} />
+              <AccountId accountId={parsedTx.signer_id} />
             </dd>
           </div>
           <div>
             <dt className="shrink-0 text-gray-500">Receiver</dt>
             <dd>
-              <AccountId accountId={parsed.receiver_id} />
+              <AccountId accountId={parsedTx.receiver_id} />
             </dd>
           </div>
           <div>
@@ -129,16 +179,16 @@ export default function TxDetail() {
         </dl>
       </div>
 
-      {(parsed.transfers.length > 0 || parsed.nftTransfers.length > 0) && (
+      {(parsedTx.transfers.length > 0 || parsedTx.nftTransfers.length > 0) && (
         <div className="mb-6 rounded-lg border border-gray-200 bg-surface text-sm">
           <div className="border-b border-gray-100 px-4 py-2">
             <h2 className="text-xs font-medium uppercase text-gray-500">Transfers</h2>
           </div>
           <div className="flex flex-col gap-1 px-4 py-3">
-            {parsed.transfers.map((t, i) => (
+            {parsedTx.transfers.map((t, i) => (
               <TransferSummary key={`ft-${i}`} transfer={t} />
             ))}
-            {parsed.nftTransfers.map((t, i) => (
+            {parsedTx.nftTransfers.map((t, i) => (
               <NftTransferSummary key={`nft-${i}`} transfer={t} />
             ))}
           </div>

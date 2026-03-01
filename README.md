@@ -54,6 +54,7 @@ This repo is standardized on Yarn Berry with workspaces.
 ### Install dependencies
 
 ```bash
+cd /Users/mikepurvis/near/fn/nearx
 source "$HOME/.nvm/nvm.sh"
 nvm use 20
 corepack enable
@@ -73,7 +74,7 @@ make web
 ### Tauri desktop
 
 ```bash
-cd tauri-workspace
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
 cargo tauri dev
 ```
 
@@ -82,10 +83,73 @@ cargo tauri dev
 ### nearxd broker
 
 ```bash
+cd /Users/mikepurvis/near/fn/nearx
 make nearxd
 ```
 
-### E2E
+## Tauri Local Setup + Deep-Link Testing
+
+### Why this matters
+
+On macOS, `nearx://...` deep links do not use dev-time runtime registration. They target the installed app bundle selected by Launch Services, which can be stale. If a stale app is installed, deep links may open legacy UI or show WASM/CSP errors.
+
+### Deterministic local desktop flow
+
+```bash
+# terminal 1
+cd /Users/mikepurvis/near/fn/nearx
+make nearxd
+
+# terminal 2
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri dev
+```
+
+### macOS deep-link ready flow (main path)
+
+```bash
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+
+# 1) Build a fresh app bundle
+cargo tauri build --debug --bundles app --no-sign
+
+# 2) Replace installed app with fresh bundle
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+
+# 3) Refresh Launch Services registration
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+
+# 4) Verify registration path
+mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
+
+# 5) Smoke deep links
+open 'nearx://v1/home'
+open 'nearx://v1/block/178923456'
+open 'nearx://v1/account/intents.near'
+```
+
+### Linux and Windows deep-link dev flow
+
+This repo uses runtime deep-link registration (`register_all`) for Linux and Windows dev mode.
+
+```bash
+# Linux
+xdg-open 'nearx://v1/home'
+
+# Windows
+start nearx://v1/home
+```
+
+### Confirm you are on current build (macOS)
+
+```bash
+mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
+strings /Applications/NEARx.app/Contents/MacOS/nearx-tauri | rg 'NEAR Rocks Explorer'
+```
+
+Expected visual sanity check: window title includes `NEARx — NEAR Rocks Explorer`.
+
+## E2E
 
 Tauri WebDriver E2E (`tauri-driver`) is supported on Linux/Windows only.
 
@@ -97,6 +161,18 @@ yarn workspace nearx-e2e test
 On macOS, run this suite in Linux CI/container.
 
 ## Troubleshooting
+
+### Deep links open stale or wrong app on macOS
+
+```bash
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri build --debug --bundles app --no-sign
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+open 'nearx://v1/home'
+```
+
+If the app still looks stale, confirm `/Applications/NEARx.app` is the one registered by `mdfind`.
 
 ### Error: Cannot find module @rollup/rollup-darwin-arm64
 
@@ -117,6 +193,25 @@ cargo tauri dev
 ```
 
 Shortcut: `make repair-js-deps` from repo root performs the cleanup + reinstall portion.
+
+### Error: You have not agreed to the Xcode license agreements
+
+If `cargo tauri dev` fails while compiling macOS crates (for example `objc2-exception-helper`), you may see logs like:
+
+- `You have not agreed to the Xcode license agreements`
+- `cc-rs ... exit status: 69`
+- `failed to run custom build command for objc2-exception-helper`
+
+Recovery sequence:
+
+```bash
+sudo xcodebuild -license accept
+sudo xcodebuild -runFirstLaunch
+xcodebuild -checkFirstLaunchStatus  # optional verification; should return exit code 0
+
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri dev
+```
 
 ## Canonical Docs
 

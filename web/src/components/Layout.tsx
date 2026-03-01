@@ -1,11 +1,12 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { Link, Outlet } from "react-router-dom";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { Link, Outlet, useLocation } from "react-router-dom";
 import SearchBar from "./SearchBar";
 import { ChevronDown, Sun, Moon, Monitor } from "lucide-react";
-import { networkId, otherNetworkId, otherNetworkUrl } from "../config";
+import { networkId, otherNetworkId } from "../config";
+import { buildCrossNetworkUrl } from "../utils/networkRouting";
 import logoSvg from "../assets/logo.svg";
 
-function NetworkSwitcher() {
+function NetworkSwitcher({ switchUrl }: { switchUrl: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -33,7 +34,7 @@ function NetworkSwitcher() {
             {networkId} ✓
           </span>
           <a
-            href={otherNetworkUrl}
+            href={switchUrl}
             className="block px-3 py-1.5 text-gray-500 hover:bg-gray-50 whitespace-nowrap"
           >
             {otherNetworkId}
@@ -106,6 +107,19 @@ function ThemeToggle() {
 }
 
 export default function Layout() {
+  const location = useLocation();
+  const switchUrl = useMemo(
+    () =>
+      buildCrossNetworkUrl({
+        currentLocation: window.location,
+        targetNetwork: otherNetworkId,
+        routePath: location.pathname,
+        search: location.search,
+        hash: location.hash,
+      }),
+    [location.pathname, location.search, location.hash],
+  );
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
       <header className="border-b border-gray-200 bg-surface">
@@ -114,7 +128,7 @@ export default function Layout() {
             <img src={logoSvg} alt="" width="24" height="18" />
             NEAR Rocks
           </Link>
-          <NetworkSwitcher />
+          <NetworkSwitcher switchUrl={switchUrl} />
           <ThemeToggle />
           <div className="w-full sm:w-auto sm:flex-1 order-last sm:order-none">
             <SearchBar />

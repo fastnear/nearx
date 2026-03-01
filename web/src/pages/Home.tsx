@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getBlocks } from "../api/endpoints";
 import type { BlockHeader } from "../api/types";
 import useInfiniteScroll from "../hooks/useInfiniteScroll";
@@ -10,6 +10,25 @@ import TimeAgo from "../components/TimeAgo";
 import BlockFilterBar from "../components/BlockFilterBar";
 
 const BATCH_SIZE = 80;
+const LIVE_POLL_INTERVAL_MS = 999;
+const LIVE_POLL_LIMIT = 24;
+const MAX_LIVE_HEAD_BLOCKS = 240;
+
+function dedupeByHeight(blocks: BlockHeader[]): BlockHeader[] {
+  const seen = new Set<number>();
+  const deduped: BlockHeader[] = [];
+
+  for (const block of blocks) {
+    if (seen.has(block.block_height)) {
+      continue;
+    }
+
+    seen.add(block.block_height);
+    deduped.push(block);
+  }
+
+  return deduped;
+}
 
 export default function Home() {
   const { filters, setFilters, filterKey, hasActiveFilters } = useBlockFilters();
@@ -48,6 +67,7 @@ export default function Home() {
           ? String(lastBlock.block_height - 1)
           : String(lastBlock.block_height + 1);
       }
+
       return {
         items: blocks,
         resumeToken: nextToken,
@@ -69,6 +89,81 @@ export default function Home() {
     batchSize: BATCH_SIZE,
     key: `blocks:${filterKey}`,
   });
+
+  const [liveHeadBlocks, setLiveHeadBlocks] = useState<BlockHeader[]>([]);
+  const liveUpdatesEnabled = isDesc && !hasActiveFilters;
+
+  useEffect(() => {
+    setLiveHeadBlocks([]);
+  }, [filterKey]);
+
+  const renderedBlocks = useMemo(
+    () => dedupeByHeight([...liveHeadBlocks, ...blocks]),
+    [blocks, liveHeadBlocks]
+  );
+
+  const topRenderedHeightRef = useRef<number | null>(null);
+  useEffect(() => {
+    topRenderedHeightRef.current = renderedBlocks[0]?.block_height ?? null;
+  }, [renderedBlocks]);
+
+  const pollForHeadUpdates = useCallback(async (opts?: { force?: boolean }) => {
+    if (!liveUpdatesEnabled) {
+      return;
+    }
+    if (!opts?.force && document.visibilityState !== "visible") {
+      return;
+    }
+
+    const currentTop = topRenderedHeightRef.current;
+
+    try {
+      const data = await getBlocks({
+        limit: LIVE_POLL_LIMIT,
+        desc: true,
+      }, { bypassCache: true });
+
+      const incoming =
+        currentTop == null
+          ? data.blocks
+          : data.blocks.filter((block) => block.block_height > currentTop);
+
+      if (incoming.length === 0) {
+        return;
+      }
+
+      setLiveHeadBlocks((prev) =>
+        dedupeByHeight([...incoming, ...prev]).slice(0, MAX_LIVE_HEAD_BLOCKS)
+      );
+    } catch {
+      // Ignore live poll errors to avoid interrupting normal list usage.
+    }
+  }, [liveUpdatesEnabled]);
+
+  useEffect(() => {
+    if (!liveUpdatesEnabled) {
+      return;
+    }
+
+    void pollForHeadUpdates({ force: true });
+
+    const intervalId = window.setInterval(() => {
+      void pollForHeadUpdates();
+    }, LIVE_POLL_INTERVAL_MS);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void pollForHeadUpdates({ force: true });
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [liveUpdatesEnabled, pollForHeadUpdates]);
 
   if (error) {
     return <p className="text-red-600">Error loading blocks: {error}</p>;
@@ -96,7 +191,7 @@ export default function Home() {
             </tr>
           </thead>
           <tbody>
-            {blocks.map((b) => (
+            {renderedBlocks.map((b) => (
               <tr
                 key={b.block_height}
                 className="border-b border-gray-100 hover:bg-gray-50"
@@ -129,7 +224,7 @@ export default function Home() {
           onChange={setFilters}
           hasActiveFilters={hasActiveFilters}
         />
-        {blocks.map((b) => (
+        {renderedBlocks.map((b) => (
           <div key={b.block_height} className="px-3 py-2.5">
             <div className="flex items-center justify-between gap-2 mb-0.5">
               <span className="font-medium text-sm">
@@ -146,7 +241,7 @@ export default function Home() {
           </div>
         ))}
       </div>
-      {!loading && blocks.length === 0 && hasActiveFilters && (
+      {!loading && renderedBlocks.length === 0 && hasActiveFilters && (
         <p className="py-8 text-center text-sm text-gray-500">
           No blocks match the current filters.
         </p>

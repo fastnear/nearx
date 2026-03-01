@@ -1,6 +1,6 @@
 # NEARx QA Playbook
 
-Status date: 2026-02-26
+Status date: 2026-02-27
 
 This is the single best QA checklist for the highest-impact repository changes:
 
@@ -38,16 +38,29 @@ printf '{"id":"1","method":"set_fastnear_api_key","params":{"token":"YOUR_KEY","
 
 ```bash
 # terminal 1
+cd /Users/mikepurvis/near/fn/nearx
 make nearxd
 
 # terminal 2
-make dev
-
-# terminal 3
-cd tauri-workspace && cargo tauri dev
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri dev
 ```
 
 ## 3) Deep-Link Validation (Tauri + Broker)
+
+### macOS precondition checkpoint
+
+Before testing deep links on macOS, ensure Launch Services points to a fresh bundle:
+
+```bash
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri build --debug --bundles app --no-sign
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
+```
+
+### Deep-link test commands
 
 ```bash
 open 'nearx://v1/tx/6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b'
@@ -61,6 +74,7 @@ Pass criteria:
 - URL canonicalizes to `nearx://v1/...`
 - app opens single instance and routes correctly
 - no invalid-route fallback to unsafe behavior
+- deep links open the current build (not a stale legacy UI build)
 
 ## 4) Auth UX Validation (Google + Magic Link)
 
@@ -107,7 +121,7 @@ FastNear docs-aligned URLs:
 
 Pass criteria:
 
-- old tx / historical block lookups succeed using archival fallback path
+- old tx and historical block lookups succeed using archival fallback path
 - requests include `apiKey` query parameter when key is configured
 
 Reference docs:

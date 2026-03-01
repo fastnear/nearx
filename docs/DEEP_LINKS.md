@@ -47,32 +47,63 @@ NEARx deep links use the `nearx://` scheme and versioned routes:
   - `nearx://v1/account/<accountId>` -> `/account/:accountId`
 - Unsupported links are intentionally routed to home.
 
-## Compatibility Notes
+## Local Testing By Platform
 
-- Legacy `near://...` inputs are compatibility input only.
-- New links and emitted links should use `nearx://v1/...`.
+### macOS (installed bundle required)
 
-## Quick Manual Validation
-
-### macOS
+On macOS, deep-link runtime registration is not available in normal `cargo tauri dev` flow. Test deep links with an installed bundle in `/Applications`.
 
 ```bash
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri build --debug --bundles app --no-sign
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
+```
+
+Then validate:
+
+```bash
+open 'nearx://v1/home'
 open 'nearx://v1/tx/<txHash>'
 open 'nearx://v1/block/178923456'
 open 'nearx://v1/account/intents.near'
 ```
 
-### Linux
+### Linux and Windows (dev runtime registration)
+
+This repo calls `register_all` for Linux and Windows dev mode, so `cargo tauri dev` can be used directly.
 
 ```bash
-xdg-open 'nearx://v1/tx/<txHash>'
+# Linux
+xdg-open 'nearx://v1/home'
+
+# Windows
+start nearx://v1/home
 ```
 
-### Windows
+## Stale Registration Recovery (macOS)
 
-```powershell
-start nearx://v1/tx/<txHash>
+If deep links open an old app build/UI:
+
+```bash
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri build --debug --bundles app --no-sign
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+open 'nearx://v1/home'
 ```
+
+Optional diagnosis:
+
+```bash
+strings /Applications/NEARx.app/Contents/MacOS/nearx-tauri | rg 'NEAR Rocks Explorer'
+```
+
+## Compatibility Notes
+
+- Legacy `near://...` inputs are compatibility input only.
+- New links and emitted links should use `nearx://v1/...`.
 
 ## Documentation Continuity Rule
 
@@ -80,4 +111,4 @@ When deep-link behavior changes:
 
 1. Update `docs/DEEP_LINK_URI_SPEC.md` first.
 2. Update this file with runtime behavior and known gaps.
-3. Update `README.md`/`QUICK_START.md` examples when user-facing behavior changes.
+3. Update `README.md` and `QUICK_START.md` examples when user-facing behavior changes.
