@@ -27,7 +27,9 @@ pub async fn run_archival_fetch_wasm(
     archival_url: String,
     auth_token: Option<String>,
 ) {
-    web_sys::console::log_1(&format!("[Archival][WASM] Starting with URL: {}", archival_url).into());
+    web_sys::console::log_1(
+        &format!("[Archival][WASM] Starting with URL: {}", archival_url).into(),
+    );
 
     while let Some(height) = fetch_rx.recv().await {
         let url = archival_url.clone();
@@ -38,11 +40,19 @@ pub async fn run_archival_fetch_wasm(
         spawn_local(async move {
             match fetch_block_from_archival(&url, height, token.as_deref()).await {
                 Ok(block) => {
-                    web_sys::console::log_1(&format!("[Archival][WASM] ✅ Fetched block #{}", height).into());
+                    web_sys::console::log_1(
+                        &format!("[Archival][WASM] ✅ Fetched block #{}", height).into(),
+                    );
                     let _ = tx.send(AppEvent::NewBlock(block));
                 }
                 Err(e) => {
-                    web_sys::console::error_1(&format!("[Archival][WASM] ❌ Failed to fetch block #{}: {}", height, e).into());
+                    web_sys::console::error_1(
+                        &format!(
+                            "[Archival][WASM] ❌ Failed to fetch block #{}: {}",
+                            height, e
+                        )
+                        .into(),
+                    );
                 }
             }
         });
@@ -60,22 +70,17 @@ async fn fetch_block_from_archival(
 ) -> Result<BlockRow, String> {
     let client = reqwest::Client::new();
 
-    // Build RPC request
-    let mut req = client
-        .post(url)
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": "wasm-archival",
-            "method": "block",
-            "params": {
-                "block_id": height
-            }
-        }));
+    let request_url = crate::config::with_fastnear_api_key(url, auth_token);
 
-    // Add auth token if provided
-    if let Some(token) = auth_token {
-        req = req.header("Authorization", format!("Bearer {}", token));
-    }
+    // Build RPC request
+    let req = client.post(&request_url).json(&json!({
+        "jsonrpc": "2.0",
+        "id": "wasm-archival",
+        "method": "block",
+        "params": {
+            "block_id": height
+        }
+    }));
 
     // Send request
     let resp = req
@@ -85,7 +90,11 @@ async fn fetch_block_from_archival(
 
     // Check status
     if !resp.status().is_success() {
-        return Err(format!("HTTP {}: {}", resp.status(), resp.status().canonical_reason().unwrap_or("Unknown")));
+        return Err(format!(
+            "HTTP {}: {}",
+            resp.status(),
+            resp.status().canonical_reason().unwrap_or("Unknown")
+        ));
     }
 
     // Parse JSON response
@@ -139,10 +148,10 @@ fn parse_block_row_from_rpc(result: &serde_json::Value, height: u64) -> Result<B
         if let Some(tx_hash) = chunk.get("tx_root").and_then(|v| v.as_str()) {
             transactions.push(crate::types::TxLite {
                 hash: tx_hash.to_string(),
-                signer_id: None,     // Not available in block header
-                receiver_id: None,   // Not available in block header
-                actions: None,       // Not available in block header
-                nonce: None,         // Not available in block header
+                signer_id: None,   // Not available in block header
+                receiver_id: None, // Not available in block header
+                actions: None,     // Not available in block header
+                nonce: None,       // Not available in block header
             });
         }
     }

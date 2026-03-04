@@ -2,10 +2,30 @@
 ///
 /// NEAR transactions often contain JSON-serialized strings as values, e.g.:
 ///   "msg": "{\"foo\":\"bar\"}"
+///   "EVENT_JSON:{\"standard\":\"nep245\",...}"
 ///
 /// This utility recursively detects and parses these strings for better readability.
 /// Ported from csli-dashboard's json-auto-parse.ts
 use serde_json::Value;
+
+/// Known prefixes for JSON-encoded event logs
+const JSON_PREFIXES: &[&str] = &["EVENT_JSON:"];
+
+/// Strip known JSON prefixes from a string and return the remaining content
+///
+/// # Arguments
+/// * `s` - The string to process
+///
+/// # Returns
+/// A tuple of (stripped_string, had_prefix)
+fn strip_json_prefix(s: &str) -> (&str, bool) {
+    for prefix in JSON_PREFIXES {
+        if let Some(stripped) = s.strip_prefix(prefix) {
+            return (stripped, true);
+        }
+    }
+    (s, false)
+}
 
 /// Recursively walks a JSON value and parses JSON-serialized strings
 ///
@@ -48,14 +68,17 @@ pub fn auto_parse_nested_json(value: Value, max_depth: usize, current_depth: usi
 
         // Handle strings: detect and parse JSON
         Value::String(s) => {
-            // Quick check: does it look like JSON?
+            // Strip known prefixes like "EVENT_JSON:"
             let trimmed = s.trim();
+            let (content, _had_prefix) = strip_json_prefix(trimmed);
+            let content = content.trim();
+
             // Catch all JSON structures: objects {}, arrays [], including [{...}], [123], etc.
-            if (trimmed.starts_with('{') || trimmed.starts_with('['))
-                && (trimmed.ends_with('}') || trimmed.ends_with(']'))
+            if (content.starts_with('{') || content.starts_with('['))
+                && (content.ends_with('}') || content.ends_with(']'))
             {
                 // Attempt to parse as JSON
-                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(content) {
                     // Recursively process the result in case it contains nested JSON strings
                     return auto_parse_nested_json(parsed, max_depth, current_depth + 1);
                 }
@@ -134,5 +157,34 @@ mod tests {
         let input = json!({"data": "[1,2,3,4,5]"});
         let output = auto_parse_nested_json(input, 5, 0);
         assert_eq!(output, json!({"data": [1, 2, 3, 4, 5]}));
+    }
+
+    #[test]
+    fn test_event_json_prefix() {
+        // Real-world case: EVENT_JSON: prefixed log entry
+        let input = json!({"log": "EVENT_JSON:{\"standard\":\"dip4\",\"version\":\"0.3.0\",\"event\":\"token_diff\"}"});
+        let output = auto_parse_nested_json(input, 5, 0);
+        assert_eq!(
+            output,
+            json!({"log": {"standard": "dip4", "version": "0.3.0", "event": "token_diff"}})
+        );
+    }
+
+    #[test]
+    fn test_event_json_prefix_with_nested_data() {
+        // Complex EVENT_JSON with nested data array
+        let input = json!({
+            "log": "EVENT_JSON:{\"standard\":\"nep245\",\"data\":[{\"owner_id\":\"alice.near\",\"amounts\":[\"100\"]}]}"
+        });
+        let output = auto_parse_nested_json(input, 5, 0);
+        assert_eq!(
+            output,
+            json!({
+                "log": {
+                    "standard": "nep245",
+                    "data": [{"owner_id": "alice.near", "amounts": ["100"]}]
+                }
+            })
+        );
     }
 }

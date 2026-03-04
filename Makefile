@@ -1,68 +1,61 @@
-# NEARx Build Automation
-# Option A: Static site with wasm-bindgen (no Trunk)
+# NEARx Build Automation (Explorer web + nearxd)
 
-.PHONY: help web web-release dev clean install-deps
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
+.PHONY: help web web-release dev nearxd nearxd-release clean install-deps repair-js-deps e2e
 
 help:
 	@echo "NEARx Build Commands:"
-	@echo "  make web          - Build web frontend (debug mode)"
-	@echo "  make web-release  - Build web frontend (release mode, optimized)"
-	@echo "  make dev          - Start local dev server for web/"
-	@echo "  make clean        - Clean build artifacts"
-	@echo "  make install-deps - Install required build tools"
+	@echo "  make web            - Build explorer frontend (production)"
+	@echo "  make web-release    - Alias for production web build"
+	@echo "  make dev            - Start explorer frontend dev server"
+	@echo "  make nearxd         - Run nearxd broker daemon"
+	@echo "  make nearxd-release - Build nearxd release binary"
+	@echo "  make e2e            - Run Selenium E2E suite"
+	@echo "  make clean          - Clean build artifacts"
+	@echo "  make install-deps   - Install JS dependencies via Yarn Berry"
+	@echo "  make repair-js-deps - Reinstall JS deps after cross-platform optional-dep issues"
 
-# Build web frontend (debug mode)
 web:
-	@echo "🔨 Building WASM (debug)..."
-	@FASTNEAR_AUTH_TOKEN="$(FASTNEAR_AUTH_TOKEN)" cargo build \
-		--target wasm32-unknown-unknown \
-		--no-default-features \
-		--features dom-web \
-		--bin nearx-web-dom
-	@echo "🔗 Generating JS bindings..."
-	@wasm-bindgen \
-		--target web \
-		--out-dir web/pkg \
-		--out-name nearx_web_dom \
-		--no-typescript \
-		target/wasm32-unknown-unknown/debug/nearx-web-dom.wasm
-	@echo "✅ Web build complete → web/"
+	@echo "Building explorer frontend..."
+	@yarn workspace explorer-frontend build
 
-# Build web frontend (release mode, optimized)
-web-release:
-	@echo "🔨 Building WASM (release, optimized)..."
-	@FASTNEAR_AUTH_TOKEN="$(FASTNEAR_AUTH_TOKEN)" cargo build \
-		--target wasm32-unknown-unknown \
-		--no-default-features \
-		--features dom-web \
-		--bin nearx-web-dom \
-		--release
-	@echo "🔗 Generating JS bindings..."
-	@wasm-bindgen \
-		--target web \
-		--out-dir web/pkg \
-		--out-name nearx_web_dom \
-		--no-typescript \
-		target/wasm32-unknown-unknown/release/nearx-web-dom.wasm
-	@echo "✅ Web build complete (release) → web/"
+web-release: web
 
-# Start local dev server
-dev: web
-	@echo "🚀 Starting dev server at http://localhost:8000"
-	@echo "   Press Ctrl+C to stop"
-	@cd web && python3 -m http.server 8000
+dev:
+	@echo "Starting explorer dev server at http://127.0.0.1:1420"
+	@yarn workspace explorer-frontend dev --host 127.0.0.1 --port 1420 --strictPort
 
-# Clean build artifacts
+nearxd:
+	@echo "Starting nearxd broker..."
+	@cargo run --bin nearxd
+
+nearxd-release:
+	@echo "Building nearxd (release)..."
+	@cargo build --release --bin nearxd
+
+e2e:
+	@echo "Running Selenium E2E suite..."
+	@yarn workspace nearx-e2e test
+
 clean:
-	@echo "🧹 Cleaning build artifacts..."
+	@echo "Cleaning build artifacts..."
 	@cargo clean
-	@rm -rf web/pkg
-	@rm -rf dist
-	@echo "✅ Clean complete"
+	@rm -rf web/dist
+	@echo "Clean complete"
 
-# Install required build tools
 install-deps:
-	@echo "📦 Installing build dependencies..."
-	@rustup target add wasm32-unknown-unknown
-	@cargo install wasm-bindgen-cli --locked
-	@echo "✅ Dependencies installed"
+	@echo "Enabling Corepack and installing workspace dependencies..."
+	@corepack enable
+	@yarn install
+	@echo "Dependencies installed"
+
+repair-js-deps:
+	@echo "Repairing JS workspace dependencies..."
+	@node -e "const fs=require('fs'); for (const p of ['node_modules','web/node_modules','e2e-tests/node_modules','.yarn/install-state.gz']) fs.rmSync(p,{recursive:true,force:true});"
+	@corepack enable
+	@yarn install
+	@echo "Dependency repair complete"

@@ -1,6 +1,6 @@
 # Chapter 2: User Guide
 
-This guide covers all user-facing features of Ratacat, including keyboard controls, filtering, mouse navigation, and accessibility features.
+This guide covers all user-facing features of NEARx, including keyboard controls, filtering, mouse navigation, and accessibility features.
 
 ## Keyboard Controls
 
@@ -44,7 +44,7 @@ This guide covers all user-facing features of Ratacat, including keyboard contro
 
 ## Filter System
 
-Ratacat provides a powerful query grammar for real-time transaction filtering:
+NEARx provides a powerful query grammar for real-time transaction filtering:
 
 ### Filter Syntax
 
@@ -72,7 +72,7 @@ freetext              # Match anywhere
 ## Text Selection & Copying
 
 ### Terminal Version (Native)
-Ratacat enables mouse capture for pane navigation. To select text from the terminal:
+NEARx enables mouse capture for pane navigation. To select text from the terminal:
 
 - **macOS iTerm2**: Hold `Option/Alt` while clicking and dragging
 - **macOS Terminal.app**: Hold `Fn` while selecting

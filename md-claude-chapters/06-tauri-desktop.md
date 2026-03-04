@@ -1,5 +1,12 @@
 # Chapter 6: Tauri Desktop
 
+> Maintenance Note (2026-02-26): This chapter contains historical implementation narrative and may include stale examples (`near://`, old bundle IDs, old file paths). For current behavior and contracts, use:
+>
+> - `docs/DEEP_LINK_URI_SPEC.md`
+> - `docs/DEEP_LINKS.md`
+> - `EXTENSION_SETUP.md`
+> - `tauri-workspace/src-tauri/tauri.conf.json`
+
 This chapter covers the Tauri desktop application, including deep link handling, configuration, and platform-specific features.
 
 ## Overview
@@ -19,7 +26,7 @@ Uses the same `web/` static site as the web build - pure DOM with WASM core, no 
 
 ## Deep Link Architecture
 
-Ratacat implements an **8-point color-coded debug logging waterfall** to trace deep link URLs through the system:
+NEARx implements an **8-point color-coded debug logging waterfall** to trace deep link URLs through the system:
 
 ```
 🔴 SINGLE-INSTANCE → 🟠 GET-CURRENT → 🟡 ON-OPEN-URL → 🟢 HANDLE-URLS
@@ -75,7 +82,7 @@ Ratacat implements an **8-point color-coded debug logging waterfall** to trace d
 
 ### Logging
 - **Development**: `tauri-plugin-log` forwards Rust logs to browser DevTools console
-- **Production**: Logs written to `~/Library/Logs/com.ratacat.fast/Ratacat.log` (macOS)
+- **Production**: Logs written to `~/Library/Logs/com.nearx.fast/NEARx.log` (macOS)
 - Both: `env_logger` outputs to stdout/stderr
 
 ### Clipboard
@@ -171,7 +178,7 @@ tauri-workspace/
 │   └── index.html           # Frontend with deep link handler
 └── target/release/bundle/
     └── macos/
-        └── Ratacat.app/
+        └── NEARx.app/
             └── Contents/
                 ├── Info.plist       # Auto-generated, includes CFBundleURLTypes
                 └── MacOS/
@@ -209,7 +216,7 @@ pub struct DeepLinkEvent {
 
 ### Issue 2: Bundle identifier restrictions
 - **Error**: `Bundle identifier cannot end with .app (reserved by Apple)`
-- **Solution**: Use `com.nearx.fast` instead of `com.ratacat.app`
+- **Solution**: Use `com.nearx.fast` instead of `com.nearx.app`
 
 ### Issue 3: Old app captures deep links
 - **Symptom**: Deep links open wrong app version
@@ -225,11 +232,11 @@ The Tauri app includes a sidecar spawn utility for the native messaging host:
 
 ```rust
 // Automatically spawns native-host binary when needed
-// Located at: Contents/Resources/ratacat-native-host
+// Located at: Contents/Resources/nearx-native-host
 // Configured in tauri.conf.json bundle.resources
 ```
 
-This enables the browser extension to send `near://` deep links to the desktop app via native messaging, creating a seamless "Open in Ratacat" experience from transaction pages.
+This enables the browser extension to send `near://` deep links to the desktop app via native messaging, creating a seamless "Open in NEARx" experience from transaction pages.
 
 ## Production Deployment
 

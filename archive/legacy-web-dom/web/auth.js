@@ -28,7 +28,11 @@
   }
 
   function setToken(t) {
-    try { localStorage.setItem("nearx.token", t || ""); } catch {}
+    const token = t || "";
+    try { localStorage.setItem("nearx.token", token); } catch {}
+    try {
+      window.dispatchEvent(new CustomEvent("nearx-auth-token-changed", { detail: { token } }));
+    } catch {}
   }
   function getToken() {
     try { return localStorage.getItem("nearx.token") || ""; } catch { return ""; }

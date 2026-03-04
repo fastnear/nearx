@@ -1,6 +1,6 @@
 # Chapter 4: Architecture
 
-This chapter covers the core architecture of Ratacat, including design principles, component organization, and the platform abstraction layer.
+This chapter covers the core architecture of NEARx, including design principles, component organization, and the platform abstraction layer.
 
 ## Key Design Principles
 
@@ -13,7 +13,7 @@ This chapter covers the core architecture of Ratacat, including design principle
 
 ## UI Feature Toggles (`UiFlags`)
 
-Ratacat uses a feature flag system to control enhanced UI behaviors introduced for Web/Tauri targets. This allows quick disable of new features without code surgery.
+NEARx uses a feature flag system to control enhanced UI behaviors introduced for Web/Tauri targets. This allows quick disable of new features without code surgery.
 
 ### Available Flags
 
@@ -194,8 +194,7 @@ nearx/
 │   ├── lib.rs           # Library exports (shared core)
 │   ├── bin/             # Platform-specific binaries
 │   │   ├── nearx.rs     # Native terminal binary
-│   │   ├── nearx-web-dom.rs # DOM frontend binary (WASM)
-│   │   └── nearx-web.rs # Legacy egui binary (deprecated)
+│   │   └── nearx-web-dom.rs # DOM frontend binary (WASM)
 │   ├── platform/        # Platform abstraction layer
 │   ├── app.rs           # Application state (shared)
 │   ├── ui.rs            # Ratatui rendering (shared)

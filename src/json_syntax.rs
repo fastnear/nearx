@@ -14,14 +14,13 @@ use ratatui::text::{Line, Span};
 ///
 /// Uses ANSI colors for maximum terminal compatibility.
 pub fn colorize_json(json_str: &str, _theme: &Theme) -> Vec<Line<'static>> {
-
     // Use subtle RGB colors - "more white" for elegant appearance
     let (key_color, string_color, number_color, boolean_color, struct_color) = (
-        Color::Rgb(180, 220, 230),  // Very light cyan for keys
-        Color::Rgb(210, 230, 180),  // Very light green for string values
-        Color::Rgb(230, 220, 180),  // Very light amber for numbers
-        Color::Rgb(220, 210, 240),  // Very light purple for booleans
-        Color::Rgb(240, 240, 230),  // Off-white for structure (brackets, colons, etc)
+        Color::Rgb(180, 220, 230), // Very light cyan for keys
+        Color::Rgb(210, 230, 180), // Very light green for string values
+        Color::Rgb(230, 220, 180), // Very light amber for numbers
+        Color::Rgb(220, 210, 240), // Very light purple for booleans
+        Color::Rgb(240, 240, 230), // Off-white for structure (brackets, colons, etc)
     );
     let mut lines = Vec::new();
     let mut current_line = Vec::new();
@@ -43,7 +42,6 @@ pub fn colorize_json(json_str: &str, _theme: &Theme) -> Vec<Line<'static>> {
             '"' => {
                 let (string_content, is_key) = parse_string(&mut chars);
                 let color = if is_key { key_color } else { string_color };
-
 
                 current_line.push(Span::styled(
                     format!("\"{string_content}\""),
@@ -202,12 +200,21 @@ mod tests {
         assert!(first_line.spans.len() > 1);
 
         // Check that at least one span has a style (not default)
-        let has_styled_spans = first_line.spans.iter().any(|span| span.style != Style::default());
-        assert!(has_styled_spans, "JSON colorizer should produce styled spans");
+        let has_styled_spans = first_line
+            .spans
+            .iter()
+            .any(|span| span.style != Style::default());
+        assert!(
+            has_styled_spans,
+            "JSON colorizer should produce styled spans"
+        );
 
         // Print debug info
         for (i, span) in first_line.spans.iter().enumerate() {
-            eprintln!("Span {}: text={:?}, style={:?}", i, &span.content, &span.style);
+            eprintln!(
+                "Span {}: text={:?}, style={:?}",
+                i, &span.content, &span.style
+            );
         }
     }
 }

@@ -1,237 +1,223 @@
-# NEARx / Ratacat
+# NEARx
 
-**Version 0.4.5+** - Production-ready NEAR blockchain explorer with quad-mode architecture
+NEARx is a NEAR explorer with a shared Rust core (`nearx`), a local broker daemon (`nearxd`), and a React/Vite frontend used by both the web target and Tauri desktop app.
 
-Fast, keyboard-driven interface sharing a single Rust core across four deployment targets:
+Status date: 2026-02-27
 
-- **Terminal UI** (Ratatui) - Native TUI with full features
-- **Web UI** (DOM + WASM) - Pure DOM, no canvas/WebGL
-- **Desktop App** (Tauri v2) - Native app with deep link support
-- **Browser Extension** - 1Password-style integration (WIP)
+## Active Targets
 
----
+- Native terminal UI (`nearx`)
+- Desktop app (Tauri v2 + `web/dist`)
+- Explorer website (`web/` React/Vite app)
+- Browser extension + native messaging host
 
-## ✨ Recent Features (v0.4.0-0.4.5)
+Legacy WASM/DOM web implementation was archived under `archive/legacy-web-dom/`.
 
-### 🔐 OAuth & Authentication (v0.4.2)
-- Google OAuth + Magic link authentication
-- Secure token management with localStorage persistence
-- XSS-hardened CSP headers for Web/Tauri
+## Repository Layout
 
-### 🎨 Pure DOM Frontend (v0.4.3)
-- Complete egui removal - zero canvas dependencies
-- JSON bridge pattern: `UiSnapshot` (state) + `UiAction` (commands)
-- Native browser UX: text selection, scrolling, accessibility
-
-### 📋 Unified Clipboard System (v0.4.1)
-- 4-tier fallback: Tauri plugin → Extension relay → Navigator API → execCommand
-- Platform abstraction eliminates code duplication
-- Works across all targets (TUI, Web, Tauri, extension)
-
-### 📜 Two-List Block Architecture (v0.4.4)
-- Seamless infinite scrolling through blockchain history
-- Automatic backfill placeholders with loading states
-- Consistent UX across TUI and Web/Tauri
-
-### ⌨️ Keyboard Shortcuts Overlay (v0.4.5+)
-- Press `?` to show comprehensive help modal (Web/Tauri)
-- Centralized state management in `App` struct
-- Infrastructure ready for TUI help screen (future)
-
-### 🔍 Fullscreen Dual-Mode Navigation (v0.4.3+)
-- **Scroll Mode**: Browse massive JSON content
-- **Navigate Mode**: Arrow keys navigate rows while viewing JSON
-- `Tab` toggles modes, `Space` toggles fullscreen
-
----
-
-## Quick Start
-
-### Terminal (Native TUI)
-
-```bash
-# Development build
-cargo run --bin nearx --features native
-
-# Release build
-cargo build --release --bin nearx --features native
-./target/release/nearx
+```text
+nearx/
+├── src/                     # shared Rust core + binaries (nearx, nearxd)
+├── tauri-workspace/         # Tauri v2 host
+├── web/                     # Explorer frontend (React + Vite)
+├── native-host/             # Native messaging host
+├── extension/               # Browser extensions
+└── archive/legacy-web-dom/  # Archived former WASM web target
 ```
 
-**Configuration**: Copy `.env.example` to `.env` and customize (optional)
+## Deep Link Contract
 
-**Keyboard shortcuts**: `/` filter • `Tab` switch panes • `Space` fullscreen • `c` copy JSON • `?` help (TUI: see CLAUDE.md)
+Canonical deep links are versioned under `nearx://v1/...` (see `docs/DEEP_LINK_URI_SPEC.md`).
 
-### Web (WASM + DOM)
+Tauri flow:
+
+1. OS deep links are received in `tauri-workspace/src-tauri/src/main.rs`.
+2. Rust canonicalizes links via `nearxd` when available.
+3. Frontend receives deep-link events and maps supported routes:
+   - `home` -> `/`
+   - `tx/<hash>` -> `/tx/:txHash`
+   - `block/<id>` -> `/block/:blockId`
+   - `account/<id>` -> `/account/:accountId`
+4. Unsupported deep links fall back to home.
+
+## Package Management
+
+This repo is standardized on Yarn Berry with workspaces.
+
+- Root package manager: `yarn@4.12.0`
+- Workspaces: `web`, `e2e-tests`
+- Linker: `node-modules` (`.yarnrc.yml`)
+- Node.js: `20.x` expected for local development (`.nvmrc`)
+
+## Build And Run
+
+### Install dependencies
 
 ```bash
-# Dev server (http://localhost:8000)
+cd /Users/mikepurvis/near/fn/nearx
+source "$HOME/.nvm/nvm.sh"
+nvm use 20
+corepack enable
+yarn install
+```
+
+### Web explorer
+
+```bash
+# Dev server
 make dev
 
 # Production build
-make web-release
-
-# Serve (Python example)
-cd web && python -m http.server 8000
+make web
 ```
 
-**Token Configuration** (optional):
-```bash
-export FASTNEAR_API_TOKEN_WEB="your-token-here"
-make dev
-```
-
-### Desktop (Tauri v2)
+### Tauri desktop
 
 ```bash
-cd tauri-workspace
-
-# Development
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
 cargo tauri dev
-
-# Production build
-cargo tauri build
 ```
 
-**Deep Links**: Supports `nearx://` protocol (e.g., `nearx://v1/tx/ABC123`)
+`cargo tauri dev` automatically starts the explorer frontend dev server via Tauri's `beforeDevCommand`, so you do not need a separate `make dev` terminal for desktop development.
 
----
-
-## Architecture Overview
-
-**Tri-Target Design** with shared Rust core:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Shared Rust Core                     │
-│  • App state (blocks, txs, filters)                     │
-│  • RPC polling & WebSocket support                      │
-│  • JSON bridge (UiSnapshot ↔ UiAction)                  │
-└─────────────────────────────────────────────────────────┘
-                          ↓
-      ┌───────────────────┼───────────────────┐
-      ↓                   ↓                   ↓
-┌──────────┐      ┌──────────────┐      ┌──────────┐
-│   TUI    │      │   Web/Tauri  │      │ Browser  │
-│ (native) │      │ (DOM + WASM) │      │   Ext    │
-│ Ratatui  │      │ JSON bridge  │      │  (WIP)   │
-└──────────┘      └──────────────┘      └──────────┘
-```
-
-**JSON Bridge** (Web/Tauri):
-- **Rust → UI**: `UiSnapshot` (serialized state)
-- **UI → Rust**: `UiAction` (user commands)
-- **Benefits**: No canvas, native DOM, perfect accessibility
-
----
-
-## Configuration
-
-### Environment Variables
-
-Copy `.env.example` to `.env` and customize:
+### nearxd broker
 
 ```bash
-# Data source (ws or rpc)
-SOURCE=rpc
-NEAR_NODE_URL=https://rpc.mainnet.fastnear.com/
-
-# FastNEAR API token (recommended to avoid rate limits)
-FASTNEAR_API_TOKEN=your-token-here
-
-# Archival RPC (optional, enables unlimited history)
-ARCHIVAL_RPC_URL=https://archival-rpc.mainnet.fastnear.com/
-
-# Performance
-RENDER_FPS=30
-KEEP_BLOCKS=100
+cd /Users/mikepurvis/near/fn/nearx
+make nearxd
 ```
 
-### CLI Override
+## Tauri Local Setup + Deep-Link Testing
 
-All settings can be overridden via CLI arguments:
+### Why this matters
+
+On macOS, `nearx://...` deep links do not use dev-time runtime registration. They target the installed app bundle selected by Launch Services, which can be stale. If a stale app is installed, deep links may open legacy UI or show WASM/CSP errors.
+
+### Deterministic local desktop flow
 
 ```bash
-./nearx --source rpc --render-fps 60 --keep-blocks 200
+# terminal 1
+cd /Users/mikepurvis/near/fn/nearx
+make nearxd
+
+# terminal 2
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri dev
 ```
 
-**See `.env.example` for all 25+ configuration options.**
+### macOS deep-link ready flow (main path)
 
----
+```bash
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+
+# 1) Build a fresh app bundle
+cargo tauri build --debug --bundles app --no-sign
+
+# 2) Replace installed app with fresh bundle
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+
+# 3) Refresh Launch Services registration
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+
+# 4) Verify registration path
+mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
+
+# 5) Smoke deep links
+open 'nearx://v1/home'
+open 'nearx://v1/block/178923456'
+open 'nearx://v1/account/intents.near'
+```
+
+### Linux and Windows deep-link dev flow
+
+This repo uses runtime deep-link registration (`register_all`) for Linux and Windows dev mode.
+
+```bash
+# Linux
+xdg-open 'nearx://v1/home'
+
+# Windows
+start nearx://v1/home
+```
+
+### Confirm you are on current build (macOS)
+
+```bash
+mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
+strings /Applications/NEARx.app/Contents/MacOS/nearx-tauri | rg 'NEAR Rocks Explorer'
+```
+
+Expected visual sanity check: window title includes `NEARx — NEAR Rocks Explorer`.
+
+## E2E
+
+Tauri WebDriver E2E (`tauri-driver`) is supported on Linux/Windows only.
+
+```bash
+# Linux or Windows host (or Linux CI/container)
+yarn workspace nearx-e2e test
+```
+
+On macOS, run this suite in Linux CI/container.
 
 ## Troubleshooting
 
-### Terminal Build Errors
-
-**Error**: `winit not supported on this platform`
-- **Fix**: Use `--features native` flag explicitly
-
-**Error**: `zstd-sys` or `secp256k1-sys` errors (Web builds)
-- **Fix**: Use `--no-default-features --features dom-web`
-
-### Web Build Errors
-
-**Error**: `wasm-bindgen version mismatch`
-- **Fix**: Reinstall CLI: `cargo install wasm-bindgen-cli --locked --force`
-
-**Error**: Connection refused in browser console
-- **Fix**: Check `NEAR_NODE_URL` in `.env` or pass via URL parameter
-
-### Runtime Issues
-
-**High CPU usage**:
-```bash
-RENDER_FPS=20 cargo run --bin nearx --features native
-```
-
-**RPC timeouts**:
-```bash
-RPC_TIMEOUT_MS=15000 POLL_CHUNK_CONCURRENCY=2 cargo run --bin nearx --features native
-```
-
----
-
-## Documentation
-
-- **`CLAUDE.md`** - **Primary source of truth**: Architecture, design decisions, full feature documentation (5000+ lines)
-- **`QUICK_START.md`** - Build/test matrix for all targets
-- **`COLLABORATION.md`** - Development guidelines and workflow
-
-**For comprehensive details**, see `CLAUDE.md` sections:
-- Quad-Mode Architecture
-- OAuth & Authentication
-- Security (CSP, XSS hardening)
-- JSON Bridge Pattern
-- Performance Characteristics
-
----
-
-## Development
-
-### Build Matrix
-
-| Target | Command | Features | Output |
-|--------|---------|----------|--------|
-| TUI | `cargo build --bin nearx --features native` | Full (SQLite, WebSocket) | Native binary |
-| Web | `make web` | DOM + WASM | `web/pkg/` |
-| Tauri | `cd tauri-workspace && cargo tauri build` | DOM + native plugins | `.app`/`.exe` |
-
-### Testing
+### Deep links open stale or wrong app on macOS
 
 ```bash
-# Unit tests
-cargo test --features native
-
-# E2E tests (Tauri)
-cd e2e-tests
-npm test
-
-# Check all targets compile
-cargo check --bin nearx --features native
-cargo check --bin nearx-web-dom --target wasm32-unknown-unknown --features dom-web
-cd tauri-workspace && cargo check
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri build --debug --bundles app --no-sign
+ditto target/debug/bundle/macos/NEARx.app /Applications/NEARx.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NEARx.app
+open 'nearx://v1/home'
 ```
 
----
+If the app still looks stale, confirm `/Applications/NEARx.app` is the one registered by `mdfind`.
 
-**License**: MIT • Built with Ratatui, Tokio, Tauri, Rust for NEAR Protocol
+### Error: Cannot find module @rollup/rollup-darwin-arm64
+
+This usually means dependencies were installed in a different platform environment (for example Linux container) and optional platform-native Rollup packages in `node_modules` no longer match macOS.
+
+Recovery sequence:
+
+```bash
+cd /Users/mikepurvis/near/fn/nearx
+node -e "const fs=require('fs'); for (const p of ['node_modules','web/node_modules','e2e-tests/node_modules','.yarn/install-state.gz']) fs.rmSync(p,{recursive:true,force:true});"
+source "$HOME/.nvm/nvm.sh"
+nvm use 20
+corepack enable
+yarn install
+ls node_modules/@rollup/rollup-darwin-arm64
+cd tauri-workspace
+cargo tauri dev
+```
+
+Shortcut: `make repair-js-deps` from repo root performs the cleanup + reinstall portion.
+
+### Error: You have not agreed to the Xcode license agreements
+
+If `cargo tauri dev` fails while compiling macOS crates (for example `objc2-exception-helper`), you may see logs like:
+
+- `You have not agreed to the Xcode license agreements`
+- `cc-rs ... exit status: 69`
+- `failed to run custom build command for objc2-exception-helper`
+
+Recovery sequence:
+
+```bash
+sudo xcodebuild -license accept
+sudo xcodebuild -runFirstLaunch
+xcodebuild -checkFirstLaunchStatus  # optional verification; should return exit code 0
+
+cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+cargo tauri dev
+```
+
+## Canonical Docs
+
+- `QUICK_START.md`
+- `BUILD_VERIFICATION.md`
+- `docs/DEEP_LINK_URI_SPEC.md`
+- `docs/DEEP_LINKS.md`
+- `docs/NEARXD.md`
+- `EXTENSION_SETUP.md`

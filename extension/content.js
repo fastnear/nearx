@@ -8,7 +8,7 @@
     btn.textContent = "Open in NEARx";
     btn.style = "position:fixed;bottom:16px;right:16px;padding:8px 12px;z-index:999999;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;";
     btn.onclick = () => {
-      chrome.runtime.sendMessage({ type: "open_deeplink", url: `near://tx/${m[1]}` });
+      chrome.runtime.sendMessage({ type: "open_deeplink", url: `nearx://v1/tx/${m[1]}` });
     };
     document.body.appendChild(btn);
   };

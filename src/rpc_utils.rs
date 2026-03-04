@@ -18,7 +18,7 @@ use gloo_timers::future::sleep;
 
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 
-fn http_client() -> &'static reqwest::Client {
+pub fn http_client() -> &'static reqwest::Client {
     HTTP.get_or_init(|| {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -45,17 +45,14 @@ pub async fn rpc_post(
     // Small, bounded retry on transient HTTP failures
     let mut attempt = 0u32;
     loop {
-        let mut req = http_client()
-            .post(url)
+        let request_url = crate::config::with_fastnear_api_key(url, auth_token);
+        let req = http_client()
+            .post(&request_url)
             .json(body)
             .timeout(Duration::from_millis(timeout_ms));
 
-        if let Some(token) = auth_token {
-            log::debug!(
-                "🔑 Adding Authorization header with token ({}... chars)",
-                token.len()
-            );
-            req = req.header("Authorization", format!("Bearer {token}"));
+        if auth_token.is_some() {
+            log::debug!("🔑 FastNEAR apiKey query parameter applied");
         } else {
             log::debug!("⚠️ No auth token provided for RPC call");
         }
@@ -133,6 +130,32 @@ pub async fn get_chunk(url: &str, hash: &str, t: u64, auth_token: Option<&str>) 
         url,
         &json!({"jsonrpc":"2.0","id":"nearx","method":"chunk","params":{"chunk_id":hash}}),
         t,
+        auth_token,
+    )
+    .await
+}
+
+/// Fetch transaction status by hash and sender account ID
+///
+/// Uses NEAR RPC `tx` method: https://docs.near.org/api/rpc/transactions#transaction-status
+///
+/// This works on both regular and archival RPC nodes. Use archival RPC URL for old transactions.
+pub async fn get_tx_status(
+    url: &str,
+    tx_hash: &str,
+    sender_account_id: &str,
+    timeout_ms: u64,
+    auth_token: Option<&str>,
+) -> Result<Value> {
+    rpc_post(
+        url,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "nearx",
+            "method": "tx",
+            "params": [tx_hash, sender_account_id]
+        }),
+        timeout_ms,
         auth_token,
     )
     .await
@@ -227,9 +250,7 @@ pub async fn fetch_block_with_txs(
 
     let hash = b["header"]["hash"].as_str().unwrap_or("").to_string();
     let prev_height = b["header"]["prev_height"].as_u64();
-    let prev_hash = b["header"]["prev_hash"]
-        .as_str()
-        .map(|s| s.to_string());
+    let prev_hash = b["header"]["prev_hash"].as_str().map(|s| s.to_string());
 
     Ok(BlockRow {
         height,

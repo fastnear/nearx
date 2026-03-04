@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use serde_json::{json, Value};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
 use std::process::Command;
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -22,6 +24,22 @@ enum InMsg {
         id: String,
         read_only: bool,
     },
+    CreateSignIntent {
+        account_id: String,
+        payload: Value,
+        origin: Option<String>,
+        expires_in_ms: Option<u64>,
+        require_user_presence: Option<bool>,
+        user_presence_reason: Option<String>,
+    },
+    ApproveSignIntent {
+        intent_id: String,
+        challenge: String,
+    },
+    ConsumeSignIntent {
+        intent_id: String,
+        challenge: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -30,6 +48,7 @@ enum OutMsg<'a> {
     Hello { version: u16 },
     Pong { id: &'a str },
     Ok { op: &'a str },
+    Data { op: &'a str, data: Value },
     Err { op: &'a str, message: String },
 }
 
@@ -63,6 +82,91 @@ fn open_url(url: &str) -> Result<()> {
         Command::new("xdg-open").arg(url).spawn()?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn nearxd_socket_path() -> PathBuf {
+    if let Ok(path) = std::env::var("NEARXD_SOCKET_PATH") {
+        let p = PathBuf::from(path.trim());
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+    std::env::temp_dir().join("nearxd.sock")
+}
+
+#[cfg(unix)]
+fn nearxd_request(method: &str, params: Value) -> Result<Value> {
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = nearxd_socket_path();
+    let mut stream = UnixStream::connect(&socket_path)
+        .with_context(|| format!("connect nearxd socket at {}", socket_path.display()))?;
+
+    let req = json!({
+        "id": "native-host",
+        "method": method,
+        "params": params
+    });
+
+    let payload = serde_json::to_string(&req).context("encode nearxd request")?;
+    stream
+        .write_all(payload.as_bytes())
+        .context("write nearxd request")?;
+    stream
+        .write_all(b"\n")
+        .context("write nearxd request delimiter")?;
+    stream.flush().context("flush nearxd request")?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .context("read nearxd response")?;
+
+    if line.trim().is_empty() {
+        anyhow::bail!("nearxd returned empty response");
+    }
+
+    let resp: serde_json::Value =
+        serde_json::from_str(line.trim()).context("decode nearxd response")?;
+    if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(resp.get("result").cloned().unwrap_or_else(|| json!({})));
+    }
+
+    let err = resp
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("nearxd rejected request");
+
+    anyhow::bail!(err.to_string())
+}
+
+#[cfg(unix)]
+fn open_url_via_nearxd(url: &str) -> Result<()> {
+    nearxd_request("open_deep_link", json!({ "url": url })).map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn open_url_via_nearxd(_url: &str) -> Result<()> {
+    anyhow::bail!("nearxd broker path is not available on this platform")
+}
+
+fn open_url_broker_first(url: &str) -> Result<()> {
+    match open_url_via_nearxd(url) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("connect nearxd socket") || msg.contains("No such file or directory") {
+                eprintln!(
+                    "[nearx-native-host] nearxd unavailable ({e}); falling back to direct OS open"
+                );
+                open_url(url)
+            } else {
+                anyhow::bail!(msg);
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -102,7 +206,7 @@ fn main() -> Result<()> {
             }
             Ok(InMsg::OpenDeepLink { url }) => {
                 let op = "open_deep_link";
-                match open_url(&url) {
+                match open_url_broker_first(&url) {
                     Ok(_) => write_msg(&mut stdout, &serde_json::to_value(OutMsg::Ok { op })?)?,
                     Err(e) => write_msg(
                         &mut stdout,
@@ -131,6 +235,150 @@ fn main() -> Result<()> {
                     )?,
                 }
             }
+            Ok(InMsg::CreateSignIntent {
+                account_id,
+                payload,
+                origin,
+                expires_in_ms,
+                require_user_presence,
+                user_presence_reason,
+            }) => {
+                let op = "create_sign_intent";
+                #[cfg(unix)]
+                {
+                    let mut params = json!({
+                        "account_id": account_id,
+                        "payload": payload,
+                    });
+                    if let Some(o) = origin {
+                        params["origin"] = json!(o);
+                    }
+                    if let Some(ttl) = expires_in_ms {
+                        params["expires_in_ms"] = json!(ttl);
+                    }
+                    if let Some(require) = require_user_presence {
+                        params["require_user_presence"] = json!(require);
+                    }
+                    if let Some(reason) = user_presence_reason {
+                        params["user_presence_reason"] = json!(reason);
+                    }
+
+                    match nearxd_request(op, params) {
+                        Ok(data) => {
+                            write_msg(
+                                &mut stdout,
+                                &serde_json::to_value(OutMsg::Data { op, data })?,
+                            )?;
+                        }
+                        Err(e) => {
+                            write_msg(
+                                &mut stdout,
+                                &serde_json::to_value(OutMsg::Err {
+                                    op,
+                                    message: e.to_string(),
+                                })?,
+                            )?;
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    write_msg(
+                        &mut stdout,
+                        &serde_json::to_value(OutMsg::Err {
+                            op,
+                            message: "sign intent forwarding is unavailable on this platform"
+                                .to_string(),
+                        })?,
+                    )?;
+                }
+            }
+            Ok(InMsg::ApproveSignIntent {
+                intent_id,
+                challenge,
+            }) => {
+                let op = "approve_sign_intent";
+                #[cfg(unix)]
+                {
+                    match nearxd_request(
+                        op,
+                        json!({
+                            "intent_id": intent_id,
+                            "challenge": challenge
+                        }),
+                    ) {
+                        Ok(data) => {
+                            write_msg(
+                                &mut stdout,
+                                &serde_json::to_value(OutMsg::Data { op, data })?,
+                            )?;
+                        }
+                        Err(e) => {
+                            write_msg(
+                                &mut stdout,
+                                &serde_json::to_value(OutMsg::Err {
+                                    op,
+                                    message: e.to_string(),
+                                })?,
+                            )?;
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    write_msg(
+                        &mut stdout,
+                        &serde_json::to_value(OutMsg::Err {
+                            op,
+                            message: "sign intent forwarding is unavailable on this platform"
+                                .to_string(),
+                        })?,
+                    )?;
+                }
+            }
+            Ok(InMsg::ConsumeSignIntent {
+                intent_id,
+                challenge,
+            }) => {
+                let op = "consume_sign_intent";
+                #[cfg(unix)]
+                {
+                    match nearxd_request(
+                        op,
+                        json!({
+                            "intent_id": intent_id,
+                            "challenge": challenge
+                        }),
+                    ) {
+                        Ok(data) => {
+                            write_msg(
+                                &mut stdout,
+                                &serde_json::to_value(OutMsg::Data { op, data })?,
+                            )?;
+                        }
+                        Err(e) => {
+                            write_msg(
+                                &mut stdout,
+                                &serde_json::to_value(OutMsg::Err {
+                                    op,
+                                    message: e.to_string(),
+                                })?,
+                            )?;
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    write_msg(
+                        &mut stdout,
+                        &serde_json::to_value(OutMsg::Err {
+                            op,
+                            message: "sign intent forwarding is unavailable on this platform"
+                                .to_string(),
+                        })?,
+                    )?;
+                }
+            }
             Err(e) => {
                 write_msg(
                     &mut stdout,
@@ -143,4 +391,128 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::Mutex;
+    use std::thread;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temp_socket_path<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("NEARXD_SOCKET_PATH").ok();
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let path = std::env::temp_dir().join(format!("nearx-native-host-test-{unique}.sock",));
+
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("NEARXD_SOCKET_PATH", &path);
+        let out = f();
+        if let Some(prev) = old {
+            std::env::set_var("NEARXD_SOCKET_PATH", prev);
+        } else {
+            std::env::remove_var("NEARXD_SOCKET_PATH");
+        }
+        let _ = std::fs::remove_file(path);
+        out
+    }
+
+    #[test]
+    fn nearxd_open_deep_link_protocol_roundtrip() {
+        with_temp_socket_path(|| {
+            let socket = nearxd_socket_path();
+            let listener = match UnixListener::bind(&socket) {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("skipping test: cannot bind unix socket in this environment");
+                    return;
+                }
+                Err(e) => panic!("failed to bind test socket: {e}"),
+            };
+
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+
+                let req: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(
+                    req.get("method").and_then(Value::as_str),
+                    Some("open_deep_link")
+                );
+                assert_eq!(
+                    req.pointer("/params/url").and_then(Value::as_str),
+                    Some("nearx://v1/home")
+                );
+
+                let resp = serde_json::json!({
+                    "id": "native-host",
+                    "ok": true,
+                    "result": { "opened": true }
+                });
+                writeln!(stream, "{resp}").unwrap();
+                stream.flush().unwrap();
+            });
+
+            let result = open_url_via_nearxd("nearx://v1/home");
+            handle.join().unwrap();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn nearxd_error_is_propagated() {
+        with_temp_socket_path(|| {
+            let socket = nearxd_socket_path();
+            let listener = match UnixListener::bind(&socket) {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("skipping test: cannot bind unix socket in this environment");
+                    return;
+                }
+                Err(e) => panic!("failed to bind test socket: {e}"),
+            };
+
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+
+                let req: Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(
+                    req.get("method").and_then(Value::as_str),
+                    Some("open_deep_link")
+                );
+
+                let resp = serde_json::json!({
+                    "id": "native-host",
+                    "ok": false,
+                    "error": { "code": "ERR_ROUTE", "message": "invalid route" }
+                });
+                writeln!(stream, "{resp}").unwrap();
+                stream.flush().unwrap();
+            });
+
+            let result = open_url_via_nearxd("nearx://bad");
+            handle.join().unwrap();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("invalid route"));
+        });
+    }
 }

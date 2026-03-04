@@ -1,6 +1,6 @@
 #![cfg_attr(target_arch = "wasm32", no_main)]
 
-//! DOM-based Web/Tauri frontend for NEARx / Ratacat.
+//! DOM-based Web/Tauri frontend for NEARx.
 //!
 //! This binary is compiled to WASM and loaded from `web/app.js` via wasm-bindgen.
 //! It exposes a minimal JSON-based API:
@@ -20,12 +20,33 @@ use web_time::{Duration, Instant};
 use nearx::ui_snapshot::{apply_ui_action, UiAction, UiSnapshot};
 use nearx::{App, AppEvent, Config, Source};
 
+#[cfg(target_arch = "wasm32")]
+fn runtime_cfg_string(key: &str) -> Option<String> {
+    use wasm_bindgen::JsValue;
+
+    let global = js_sys::global();
+    let cfg = js_sys::Reflect::get(&global, &JsValue::from_str("__NEARX_RUNTIME_CONFIG")).ok()?;
+    if cfg.is_null() || cfg.is_undefined() {
+        return None;
+    }
+
+    js_sys::Reflect::get(&cfg, &JsValue::from_str(key))
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.trim().is_empty())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn runtime_cfg_string(_key: &str) -> Option<String> {
+    None
+}
+
 /// Wasm-exposed app wrapper. JS owns an instance of this and communicates via JSON.
 #[wasm_bindgen]
 pub struct WasmApp {
     app: App,
     event_rx: UnboundedReceiver<AppEvent>,
-    last_tick: Instant,  // For on_tick() throttling
+    last_tick: Instant, // For on_tick() throttling
 }
 
 impl Default for WasmApp {
@@ -48,7 +69,7 @@ impl WasmApp {
         // Channel for RPC -> App events.
         let (event_tx, event_rx) = unbounded_channel::<AppEvent>();
 
-        // Read ALL configuration from environment variables at compile time
+        // Render/layout config remains compile-time for web portability.
         let fps: u32 = option_env!("RENDER_FPS")
             .and_then(|s| s.parse().ok())
             .unwrap_or(30);
@@ -68,15 +89,53 @@ impl WasmApp {
             "acct:intents.near".to_string()
         };
 
+        // Runtime overrides from host (Tauri -> worker global):
+        // globalThis.__NEARX_RUNTIME_CONFIG = { near_node_url, fastnear_api_url, fastnear_auth_token }
+        let runtime_near_node_url = runtime_cfg_string("near_node_url");
+        let runtime_fastnear_api_url = runtime_cfg_string("fastnear_api_url");
+        let runtime_fastnear_auth_token = runtime_cfg_string("fastnear_auth_token");
+        let runtime_archival_rpc_url = runtime_cfg_string("archival_rpc_url");
+
+        let resolved_near_node_url = runtime_near_node_url.unwrap_or_else(|| {
+            option_env!("NEAR_NODE_URL")
+                .unwrap_or("https://rpc.mainnet.fastnear.com/")
+                .to_string()
+        });
+
+        let resolved_fastnear_api_url = runtime_fastnear_api_url.unwrap_or_else(|| {
+            option_env!("FASTNEAR_API_URL")
+                .unwrap_or("https://api.fastnear.com")
+                .to_string()
+        });
+
+        let resolved_fastnear_auth_token = runtime_fastnear_auth_token.or_else(|| {
+            let token = nearx::config::fastnear_token();
+            if token.is_empty() {
+                None
+            } else {
+                Some(token)
+            }
+        });
+
+        let resolved_archival_rpc_url = runtime_archival_rpc_url
+            .or_else(|| option_env!("ARCHIVAL_RPC_URL").map(|s| s.to_string()));
+
         // Initialize archival fetch channel (WASM version)
         let (archival_tx, archival_rx) = unbounded_channel::<u64>();
         let archival_fetch_tx = Some(archival_tx);
+
+        // Initialize tx_details_fetch channel (WASM version): (tx_hash, sender_account_id)
+        let (tx_details_tx, tx_details_rx) = unbounded_channel::<(String, String)>();
 
         // Build config for the RPC poller.
         let cfg_default_filter = default_filter.clone();
         let cfg_fps = fps;
         let cfg_fps_choices = fps_choices.clone();
         let cfg_keep_blocks = keep_blocks;
+        let cfg_near_node_url = resolved_near_node_url.clone();
+        let cfg_fastnear_api_url = resolved_fastnear_api_url.clone();
+        let cfg_fastnear_auth_token = resolved_fastnear_auth_token.clone();
+        let cfg_archival_rpc_url = resolved_archival_rpc_url.clone();
 
         spawn_local(async move {
             let config = Config {
@@ -91,18 +150,13 @@ impl WasmApp {
                 poll_max_catchup: 5,
                 poll_chunk_concurrency: 4,
                 keep_blocks: cfg_keep_blocks,
-                near_node_url: option_env!("NEAR_NODE_URL")
-                    .unwrap_or("https://rpc.mainnet.fastnear.com/")
-                    .to_string(),
+                near_node_url: cfg_near_node_url,
                 near_node_url_explicit: false,
-                archival_rpc_url: option_env!("ARCHIVAL_RPC_URL")
-                    .map(|s| s.to_string()),
+                archival_rpc_url: cfg_archival_rpc_url,
+                fastnear_api_url: cfg_fastnear_api_url,
                 rpc_timeout_ms: 8_000,
                 rpc_retries: 2,
-                fastnear_auth_token: {
-                    let token = nearx::config::fastnear_token();
-                    if token.is_empty() { None } else { Some(token) }
-                },
+                fastnear_auth_token: cfg_fastnear_auth_token,
                 default_filter: cfg_default_filter,
                 theme: nearx::theme::Theme::default(),
             };
@@ -123,10 +177,41 @@ impl WasmApp {
                         archival_event_tx,
                         archival_url,
                         auth_token,
-                    ).await;
+                    )
+                    .await;
                 });
 
                 log::info!("[WasmApp] Archival fetch task spawned");
+            }
+
+            // Spawn WASM tx_details_fetch task (uses RPC with archival fallback)
+            {
+                let rpc_url = config.near_node_url.clone();
+                let archival_url = config.archival_rpc_url.clone();
+                let auth_token = config.fastnear_auth_token.clone();
+                let tx_details_event_tx = event_tx.clone();
+
+                spawn_local(async move {
+                    nearx::tx_details_fetch_wasm::run_tx_details_fetch_wasm(
+                        tx_details_rx,
+                        tx_details_event_tx,
+                        rpc_url,
+                        archival_url,
+                        auth_token,
+                    )
+                    .await;
+                });
+
+                log::info!(
+                    "[WasmApp] Tx details fetch task spawned - RPC: {}, Archival: {:?}, Auth: {}",
+                    config.near_node_url,
+                    config.archival_rpc_url,
+                    if config.fastnear_auth_token.is_some() {
+                        "present"
+                    } else {
+                        "missing"
+                    }
+                );
             }
 
             if let Err(e) = nearx::source_rpc::run_rpc(&config, event_tx).await {
@@ -140,6 +225,9 @@ impl WasmApp {
             keep_blocks,
             default_filter,
             archival_fetch_tx,
+            resolved_fastnear_api_url,
+            resolved_fastnear_auth_token,
+            Some(tx_details_tx),
         );
 
         WasmApp {
@@ -179,6 +267,52 @@ impl WasmApp {
         })
     }
 
+    /// Apply a deep-link URI using the shared router.
+    #[wasm_bindgen(js_name = "applyDeepLink")]
+    pub fn apply_deep_link(&mut self, url: String) -> bool {
+        self.drain_events();
+        if let Some(route) = nearx::router::parse(&url) {
+            self.app.apply_route(&route);
+            true
+        } else {
+            false
+        }
+    }
+
+    // ========================================================================
+    // MessagePack API (binary serialization for 3-5x performance improvement)
+    // ========================================================================
+
+    /// Get current snapshot as MessagePack binary (optimized for performance).
+    ///
+    /// Returns binary-encoded UiSnapshot. JavaScript should decode with msgpack.decode().
+    /// This is 3-5x faster than JSON serialization and 50-70% smaller payload.
+    #[wasm_bindgen]
+    pub fn snapshot_msgpack(&mut self) -> Vec<u8> {
+        self.drain_events();
+        let snap = UiSnapshot::from_app(&self.app);
+        snap.to_msgpack()
+    }
+
+    /// Apply an action (MessagePack-encoded UiAction) and return an updated snapshot.
+    ///
+    /// Accepts binary-encoded UiAction, returns binary-encoded UiSnapshot.
+    /// Use msgpack.encode() in JavaScript to create the action bytes.
+    #[wasm_bindgen]
+    pub fn handle_action_msgpack(&mut self, action_bytes: &[u8]) -> Vec<u8> {
+        self.drain_events();
+
+        match UiAction::from_msgpack(action_bytes) {
+            Ok(action) => apply_ui_action(&mut self.app, action),
+            Err(e) => {
+                log::warn!("[WasmApp] Failed to deserialize MessagePack UiAction: {e}");
+            }
+        }
+
+        let snap = UiSnapshot::from_app(&self.app);
+        snap.to_msgpack()
+    }
+
     /// Set Details pane viewport size (called by JS based on pane height).
     #[wasm_bindgen(js_name = "setDetailsViewportLines")]
     pub fn set_details_viewport_lines_js(&mut self, lines: u32) {
@@ -191,9 +325,9 @@ impl WasmApp {
         self.drain_events();
 
         match self.app.pane() {
-            0 => self.app.get_raw_block_json(),      // Blocks pane
-            1 => self.app.get_raw_tx_json(),         // Transactions pane
-            2 => self.app.details().to_string(),     // Details pane
+            0 => self.app.get_raw_block_json(),  // Blocks pane
+            1 => self.app.get_raw_tx_json(),     // Transactions pane
+            2 => self.app.details().to_string(), // Details pane
             _ => String::new(),
         }
     }

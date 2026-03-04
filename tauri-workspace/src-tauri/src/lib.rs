@@ -356,8 +356,15 @@ pub fn run() {
             // Dev convenience (Win/Linux). macOS requires installed app.
             #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
             {
-                log::info!("Registering deep link schemes (Win/Linux dev mode)");
-                app.deep_link().register_all()?;
+                #[cfg(feature = "e2e")]
+                {
+                    log::info!("E2E mode: skipping deep-link scheme registration");
+                }
+                #[cfg(not(feature = "e2e"))]
+                {
+                    log::info!("Registering deep link schemes (Win/Linux dev mode)");
+                    app.deep_link().register_all()?;
+                }
             }
 
             #[cfg(all(target_os = "macos", debug_assertions))]

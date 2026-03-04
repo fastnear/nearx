@@ -1,190 +1,692 @@
-//! Versioned deep link router for NEARx
+//! Strict deep-link router for NEARx.
 //!
-//! Supports nearx://v1/* URLs that map to the current explorer UI.
-//! Routes are intentionally simple and leverage existing filter + pane focus.
-//!
-//! ## Supported Routes (v1)
-//!
-//! - `nearx://v1/tx/<hash>` - Focus transactions pane, filter to hash
-//! - `nearx://v1/block/<height>` - Focus blocks pane, filter to height
-//! - `nearx://v1/account/<id>` - Focus transactions pane, filter to account
-//! - `nearx://v1/home` - Clear filter, return to auto-follow
-//!
-//! ## Robust Parsing
-//!
-//! The parser handles various URL formats robustly:
-//! - Case-insensitive scheme: `NEARX://`, `nearx://`, `NEARx://`
-//! - Single-slash variants: `nearx:/v1/...`
-//! - Multiple slashes: `nearx:////v1/...`
-//! - Query and fragment stripping: `nearx://v1/tx/ABC?utm=1#frag`
-//!
-//! ## Web Hash Formats
-//!
-//! For web environments, also accepts:
-//! - `#/v1/tx/<hash>` - Direct hash routing
-//! - `#/deeplink/<encodeURIComponent(nearx://...)>` - Encoded deep link
-//!
-//! ## Example
-//!
-//! ```rust,ignore
-//! use nearx::router::{parse, Route, RouteV1};
-//!
-//! let route = parse("nearx://v1/tx/ABC123").unwrap();
-//! match route {
-//!     Route::V1(RouteV1::Tx { hash }) => {
-//!         println!("Transaction: {}", hash);
-//!     }
-//!     _ => {}
-//! }
-//! ```
+//! Canonical URIs use `nearx://v1/...` and are parsed into typed route variants.
+//! Compatibility aliases (`near://...`, `nearx://tx/...`, etc.) are accepted on
+//! input and normalized to canonical form.
 
-/// Strip query and fragment from URL path
-#[inline]
-fn strip_query_frag(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'?' || b == b'#' {
-            return &s[..i];
-        }
-    }
-    s
+use std::collections::BTreeMap;
+use std::fmt;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Network {
+    Mainnet,
+    Testnet,
+    Betanet,
+    Localnet,
+    Custom,
 }
 
-/// Extract path after nearx:// scheme (case-insensitive, handles variants)
-#[inline]
-fn after_nearx_scheme(raw: &str) -> Option<&str> {
-    // Accept nearx://, NEARX://, nearx:/, nearx:////...
-    let s = raw.trim();
-    if let Some(pos) = s.find("://") {
-        if s[..pos].eq_ignore_ascii_case("nearx") {
-            let mut rest = &s[pos + 3..];
-            while rest.starts_with('/') {
-                rest = &rest[1..];
-            }
-            return Some(rest);
+impl Network {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "mainnet" => Some(Self::Mainnet),
+            "testnet" => Some(Self::Testnet),
+            "betanet" => Some(Self::Betanet),
+            "localnet" => Some(Self::Localnet),
+            "custom" => Some(Self::Custom),
+            _ => None,
         }
-    } else if let Some(rest) = s.strip_prefix("nearx:") {
-        let mut r = rest;
-        while r.starts_with('/') {
-            r = &r[1..];
-        }
-        return Some(r);
     }
-    None
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Betanet => "betanet",
+            Self::Localnet => "localnet",
+            Self::Custom => "custom",
+        }
+    }
 }
 
-/// V1 route variants
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockRef {
+    Height(u64),
+    Hash(String),
+}
+
+impl BlockRef {
+    fn as_string(&self) -> String {
+        match self {
+            Self::Height(h) => h.to_string(),
+            Self::Hash(h) => h.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RouteV1 {
-    /// Transaction details: `nearx://v1/tx/<hash>`
-    Tx { hash: String },
-    /// Block details: `nearx://v1/block/<height>`
-    Block { height: u64 },
-    /// Account transactions: `nearx://v1/account/<id>`
-    Account { id: String },
-    /// Home (clear state): `nearx://v1/home`
     Home,
+    Tx {
+        tx_hash: String,
+        block: Option<BlockRef>,
+        network: Option<Network>,
+    },
+    Block {
+        block: BlockRef,
+        network: Option<Network>,
+    },
+    Account {
+        account_id: String,
+        network: Option<Network>,
+    },
+    Contract {
+        account_id: String,
+        method: Option<String>,
+        network: Option<Network>,
+    },
+    AccessKey {
+        account_id: String,
+        public_key: String,
+        network: Option<Network>,
+    },
 }
 
-/// Versioned route container
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
-    /// Version 1 routes
     V1(RouteV1),
 }
 
-/// Parse a route from various URL formats
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedDeepLink {
+    pub route: Route,
+    pub canonical_uri: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    Scheme,
+    Version,
+    Route,
+    SegmentCount,
+    QueryKey(String),
+    IdentifierFormat(String),
+    Decode,
+    Empty,
+}
+
+impl ParseError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Scheme => "ERR_SCHEME",
+            Self::Version => "ERR_VERSION",
+            Self::Route => "ERR_ROUTE",
+            Self::SegmentCount => "ERR_SEGMENT_COUNT",
+            Self::QueryKey(_) => "ERR_QUERY_KEY",
+            Self::IdentifierFormat(_) => "ERR_IDENTIFIER_FORMAT",
+            Self::Decode => "ERR_DECODE",
+            Self::Empty => "ERR_ROUTE",
+        }
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scheme => write!(f, "unsupported deep-link scheme"),
+            Self::Version => write!(f, "unsupported route version"),
+            Self::Route => write!(f, "unsupported route"),
+            Self::SegmentCount => write!(f, "invalid route segment count"),
+            Self::QueryKey(k) => write!(f, "unsupported query key: {k}"),
+            Self::IdentifierFormat(v) => write!(f, "invalid identifier format: {v}"),
+            Self::Decode => write!(f, "failed to decode deep-link input"),
+            Self::Empty => write!(f, "empty deep-link input"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Parse from deep-link or web hash route. Returns `None` for invalid inputs.
 ///
-/// Accepts:
-/// - `nearx://v1/tx/<hash>`
-/// - `nearx://v1/block/<height>`
-/// - `nearx://v1/account/<id>`
-/// - `nearx://v1/home` or `nearx://v1/` or `nearx://v1`
-/// - `#/v1/...` (web hash format)
-/// - `#/deeplink/<encoded>` (Tauri bridge format)
-/// - `/v1/...` (path only)
-///
-/// Returns `None` for invalid URLs or unsupported versions.
+/// Supported forms:
+/// - `nearx://v1/...` (canonical)
+/// - `near://...` (compatibility input)
+/// - `nearx://tx/...` / `nearx://block/...` aliases
+/// - `#/v1/...` and `/v1/...`
+/// - `#/deeplink/<encodeURIComponent(nearx://...)>`
 pub fn parse(raw: &str) -> Option<Route> {
-    if raw.is_empty() {
-        return Some(Route::V1(RouteV1::Home));
+    parse_any(raw).ok()
+}
+
+/// Parse and canonicalize a deep-link URI.
+///
+/// This function is strict and intended for deep-link transport boundaries
+/// (broker, native host, desktop entry points).
+pub fn parse_deep_link(raw: &str) -> Result<ParsedDeepLink, ParseError> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(ParseError::Empty);
     }
 
+    let normalized = normalize_scheme(s)?;
+    let (path_part, query_part) = split_path_and_query(&normalized);
+    let path_segments = decode_segments(path_part)?;
+    let query = parse_query_map(query_part)?;
+
+    let route_v1 = parse_route_v1(&path_segments, &query)?;
+    let route = Route::V1(route_v1);
+    let canonical_uri = canonical_uri(&route);
+
+    Ok(ParsedDeepLink {
+        route,
+        canonical_uri,
+    })
+}
+
+fn parse_any(raw: &str) -> Result<Route, ParseError> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(Route::V1(RouteV1::Home));
+    }
+
+    if let Some(encoded) = s.strip_prefix("#/deeplink/") {
+        let decoded = urlencoding::decode(encoded).map_err(|_| ParseError::Decode)?;
+        return parse_deep_link(decoded.as_ref()).map(|p| p.route);
+    }
+
+    if let Some(path) = s.strip_prefix("#/") {
+        return parse_deep_link(&format!("nearx://{path}")).map(|p| p.route);
+    }
+
+    if let Some(path) = s.strip_prefix('/') {
+        return parse_deep_link(&format!("nearx://{path}")).map(|p| p.route);
+    }
+
+    if s.starts_with("v1/") || s.eq_ignore_ascii_case("v1") {
+        return parse_deep_link(&format!("nearx://{s}")).map(|p| p.route);
+    }
+
+    parse_deep_link(s).map(|p| p.route)
+}
+
+fn normalize_scheme(raw: &str) -> Result<String, ParseError> {
     let s = raw.trim();
 
-    // Extract path component from various formats
-    let path = if let Some(rest) = after_nearx_scheme(s) {
-        // Robust scheme handling (case-insensitive, slash variants)
-        rest
-    } else if s.starts_with("#/deeplink/") {
-        // Encoded deep link: #/deeplink/<encodeURIComponent(nearx://...)>
-        // This format is only used in WASM (Tauri->Web bridge)
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(encoded) = s.strip_prefix("#/deeplink/") {
-                // Decode using web APIs - handle Result and convert JsString to String
-                match js_sys::decode_uri_component(encoded) {
-                    Ok(js_string) => {
-                        let decoded = String::from(js_string);
-                        // Recursively parse the decoded URL
-                        return parse(&decoded);
-                    }
-                    Err(_) => return None,
-                }
-            }
-        }
-        // Non-WASM: not supported (native TUI doesn't use hash routing)
-        return None;
-    } else if let Some(rest) = s.strip_prefix("#/") {
-        // Direct hash: #/v1/...
-        rest
-    } else if let Some(rest) = s.strip_prefix("/") {
-        // Path only: /v1/...
-        rest
-    } else if s.starts_with("v1/") {
-        // Already normalized
-        s
+    let s = if let Some(rest) = s.strip_prefix("web+nearx:") {
+        format!("nearx:{rest}")
+    } else if let Some(rest) = s.strip_prefix("web+near:") {
+        format!("near:{rest}")
     } else {
-        s
+        s.to_string()
     };
 
-    // Strip query parameters and fragments
-    let path = strip_query_frag(path);
+    let Some((scheme, rest)) = s.split_once(':') else {
+        return Err(ParseError::Scheme);
+    };
 
-    // Parse version and route: "v1/tx/ABC123" or "v1/block/12345" etc.
-    let mut segments = path.split('/').filter(|s| !s.is_empty());
-
-    let version = segments.next()?.to_ascii_lowercase();
-    if version != "v1" {
-        return None; // Unsupported version
+    if !scheme.eq_ignore_ascii_case("nearx") && !scheme.eq_ignore_ascii_case("near") {
+        return Err(ParseError::Scheme);
     }
 
-    let page = segments.next().unwrap_or("").to_ascii_lowercase();
+    let mut rest = rest;
+    while rest.starts_with('/') {
+        rest = &rest[1..];
+    }
+
+    Ok(format!("nearx://{rest}"))
+}
+
+fn split_path_and_query(normalized: &str) -> (&str, Option<&str>) {
+    let rest = normalized.strip_prefix("nearx://").unwrap_or(normalized);
+    let no_fragment = rest.split('#').next().unwrap_or(rest);
+    if let Some((path, query)) = no_fragment.split_once('?') {
+        (path, Some(query))
+    } else {
+        (no_fragment, None)
+    }
+}
+
+fn decode_segments(path: &str) -> Result<Vec<String>, ParseError> {
+    let mut out = Vec::new();
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        let decoded = urlencoding::decode(seg).map_err(|_| ParseError::Decode)?;
+        out.push(decoded.into_owned());
+    }
+    Ok(out)
+}
+
+fn parse_query_map(query: Option<&str>) -> Result<BTreeMap<String, String>, ParseError> {
+    let mut map = BTreeMap::new();
+    let Some(q) = query else {
+        return Ok(map);
+    };
+
+    for pair in q.split('&').filter(|p| !p.is_empty()) {
+        let (k_raw, v_raw) = if let Some((k, v)) = pair.split_once('=') {
+            (k, v)
+        } else {
+            (pair, "")
+        };
+
+        let k = urlencoding::decode(k_raw)
+            .map_err(|_| ParseError::Decode)?
+            .into_owned();
+        let v = urlencoding::decode(v_raw)
+            .map_err(|_| ParseError::Decode)?
+            .into_owned();
+
+        if map.contains_key(&k) {
+            return Err(ParseError::QueryKey(k));
+        }
+        map.insert(k, v);
+    }
+
+    Ok(map)
+}
+
+fn parse_route_v1(
+    segments: &[String],
+    query: &BTreeMap<String, String>,
+) -> Result<RouteV1, ParseError> {
+    if segments.is_empty() {
+        return Err(ParseError::Version);
+    }
+
+    let first = segments[0].to_ascii_lowercase();
+    if first == "v1" {
+        parse_v1_canonical(segments, query)
+    } else if first.starts_with('v')
+        && first.len() > 1
+        && first[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        Err(ParseError::Version)
+    } else {
+        parse_v1_alias(segments, query)
+    }
+}
+
+fn parse_v1_canonical(
+    segments: &[String],
+    query: &BTreeMap<String, String>,
+) -> Result<RouteV1, ParseError> {
+    let page = segments
+        .get(1)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "home".to_string());
+
     match page.as_str() {
-        "" | "home" => Some(Route::V1(RouteV1::Home)),
-        "tx" => {
-            let hash = segments.next()?.to_string();
-            if hash.is_empty() {
-                None
-            } else {
-                Some(Route::V1(RouteV1::Tx { hash }))
+        "home" => {
+            ensure_segment_len(segments, &[1, 2])?;
+            ensure_query_keys(query, &["network"])?;
+            if query.contains_key("network") {
+                return Err(ParseError::QueryKey("network".to_string()));
             }
+            Ok(RouteV1::Home)
+        }
+        "tx" => {
+            ensure_segment_len(segments, &[3])?;
+            ensure_query_keys(query, &["block", "network"])?;
+
+            let tx_hash = segments[2].clone();
+            validate_tx_hash(&tx_hash)?;
+
+            let block = query.get("block").map(|v| parse_block_ref(v)).transpose()?;
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Tx {
+                tx_hash,
+                block,
+                network,
+            })
         }
         "block" => {
-            let height_str = segments.next()?;
-            let height = height_str.parse::<u64>().ok()?;
-            Some(Route::V1(RouteV1::Block { height }))
+            ensure_segment_len(segments, &[3])?;
+            ensure_query_keys(query, &["network"])?;
+
+            let block = parse_block_ref(&segments[2])?;
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Block { block, network })
         }
         "account" => {
-            let id = segments.next()?.to_string();
-            if id.is_empty() {
-                None
-            } else {
-                Some(Route::V1(RouteV1::Account { id }))
-            }
+            ensure_segment_len(segments, &[3])?;
+            ensure_query_keys(query, &["network"])?;
+
+            let account_id = segments[2].clone();
+            validate_account_id(&account_id)?;
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Account {
+                account_id,
+                network,
+            })
         }
-        _ => None, // Unknown route
+        "contract" => {
+            ensure_segment_len(segments, &[3])?;
+            ensure_query_keys(query, &["method", "network"])?;
+
+            let account_id = segments[2].clone();
+            validate_account_id(&account_id)?;
+
+            let method = query.get("method").cloned();
+            if let Some(m) = method.as_deref() {
+                validate_method_name(m)?;
+            }
+
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Contract {
+                account_id,
+                method,
+                network,
+            })
+        }
+        "access-key" => {
+            ensure_segment_len(segments, &[4])?;
+            ensure_query_keys(query, &["network"])?;
+
+            let account_id = segments[2].clone();
+            validate_account_id(&account_id)?;
+
+            let public_key = segments[3].clone();
+            validate_public_key(&public_key)?;
+
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::AccessKey {
+                account_id,
+                public_key,
+                network,
+            })
+        }
+        _ => Err(ParseError::Route),
     }
+}
+
+fn parse_v1_alias(
+    segments: &[String],
+    query: &BTreeMap<String, String>,
+) -> Result<RouteV1, ParseError> {
+    let page = segments
+        .first()
+        .map(|s| s.to_ascii_lowercase())
+        .ok_or(ParseError::Route)?;
+
+    match page.as_str() {
+        "home" => {
+            ensure_segment_len(segments, &[1])?;
+            ensure_query_keys(query, &[])?;
+            Ok(RouteV1::Home)
+        }
+        "tx" => {
+            ensure_segment_len(segments, &[2, 3])?;
+            ensure_query_keys(query, &["block", "network"])?;
+
+            let (tx_hash, block) = if segments.len() == 3 {
+                let block = parse_block_ref(&segments[1])?;
+                (segments[2].clone(), Some(block))
+            } else {
+                let block = query.get("block").map(|v| parse_block_ref(v)).transpose()?;
+                (segments[1].clone(), block)
+            };
+
+            validate_tx_hash(&tx_hash)?;
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Tx {
+                tx_hash,
+                block,
+                network,
+            })
+        }
+        "block" => {
+            ensure_segment_len(segments, &[2])?;
+            ensure_query_keys(query, &["network"])?;
+
+            let block = parse_block_ref(&segments[1])?;
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Block { block, network })
+        }
+        "account" => {
+            ensure_segment_len(segments, &[2])?;
+            ensure_query_keys(query, &["network"])?;
+
+            let account_id = segments[1].clone();
+            validate_account_id(&account_id)?;
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Account {
+                account_id,
+                network,
+            })
+        }
+        "contract" => {
+            ensure_segment_len(segments, &[2])?;
+            ensure_query_keys(query, &["method", "network"])?;
+
+            let account_id = segments[1].clone();
+            validate_account_id(&account_id)?;
+
+            let method = query.get("method").cloned();
+            if let Some(m) = method.as_deref() {
+                validate_method_name(m)?;
+            }
+
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Contract {
+                account_id,
+                method,
+                network,
+            })
+        }
+        "access-key" => {
+            ensure_segment_len(segments, &[3])?;
+            ensure_query_keys(query, &["network"])?;
+
+            let account_id = segments[1].clone();
+            validate_account_id(&account_id)?;
+
+            let public_key = segments[2].clone();
+            validate_public_key(&public_key)?;
+
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::AccessKey {
+                account_id,
+                public_key,
+                network,
+            })
+        }
+        _ => Err(ParseError::Route),
+    }
+}
+
+fn parse_network_query(query: &BTreeMap<String, String>) -> Result<Option<Network>, ParseError> {
+    query
+        .get("network")
+        .map(|v| {
+            Network::parse(v).ok_or_else(|| ParseError::IdentifierFormat(format!("network:{v}")))
+        })
+        .transpose()
+}
+
+fn ensure_segment_len(segments: &[String], accepted: &[usize]) -> Result<(), ParseError> {
+    if accepted.contains(&segments.len()) {
+        Ok(())
+    } else {
+        Err(ParseError::SegmentCount)
+    }
+}
+
+fn ensure_query_keys(query: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), ParseError> {
+    for key in query.keys() {
+        if !allowed.iter().any(|k| *k == key) {
+            return Err(ParseError::QueryKey(key.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn parse_block_ref(raw: &str) -> Result<BlockRef, ParseError> {
+    if raw.chars().all(|c| c.is_ascii_digit()) {
+        let h = raw
+            .parse::<u64>()
+            .map_err(|_| ParseError::IdentifierFormat(format!("blockRef:{raw}")))?;
+        if h == 0 {
+            return Err(ParseError::IdentifierFormat(format!("blockRef:{raw}")));
+        }
+        return Ok(BlockRef::Height(h));
+    }
+
+    if is_base58(raw) && (43..=44).contains(&raw.len()) {
+        return Ok(BlockRef::Hash(raw.to_string()));
+    }
+
+    Err(ParseError::IdentifierFormat(format!("blockRef:{raw}")))
+}
+
+fn validate_tx_hash(tx_hash: &str) -> Result<(), ParseError> {
+    if is_base58(tx_hash) && (43..=44).contains(&tx_hash.len()) {
+        Ok(())
+    } else {
+        Err(ParseError::IdentifierFormat(format!("txHash:{tx_hash}")))
+    }
+}
+
+fn validate_account_id(account_id: &str) -> Result<(), ParseError> {
+    if !(2..=64).contains(&account_id.len()) {
+        return Err(ParseError::IdentifierFormat(format!(
+            "accountId:{account_id}"
+        )));
+    }
+
+    if account_id.len() == 64 && account_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+
+    if !account_id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(ParseError::IdentifierFormat(format!(
+            "accountId:{account_id}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_public_key(public_key: &str) -> Result<(), ParseError> {
+    let Some((curve, payload)) = public_key.split_once(':') else {
+        return Err(ParseError::IdentifierFormat(format!(
+            "publicKey:{public_key}"
+        )));
+    };
+
+    if curve != "ed25519" && curve != "secp256k1" {
+        return Err(ParseError::IdentifierFormat(format!(
+            "publicKey:{public_key}"
+        )));
+    }
+
+    if !is_base58(payload) || !(32..=128).contains(&payload.len()) {
+        return Err(ParseError::IdentifierFormat(format!(
+            "publicKey:{public_key}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_method_name(method: &str) -> Result<(), ParseError> {
+    if method.is_empty() || method.len() > 128 {
+        return Err(ParseError::IdentifierFormat(format!("method:{method}")));
+    }
+
+    if !method
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$' || c == '-')
+    {
+        return Err(ParseError::IdentifierFormat(format!("method:{method}")));
+    }
+
+    Ok(())
+}
+
+fn is_base58(s: &str) -> bool {
+    const B58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    !s.is_empty() && s.chars().all(|c| B58.contains(c))
+}
+
+fn canonical_uri(route: &Route) -> String {
+    match route {
+        Route::V1(RouteV1::Home) => "nearx://v1/home".to_string(),
+        Route::V1(RouteV1::Tx {
+            tx_hash,
+            block,
+            network,
+        }) => {
+            let mut q = BTreeMap::new();
+            if let Some(b) = block {
+                q.insert("block".to_string(), b.as_string());
+            }
+            if let Some(n) = network {
+                q.insert("network".to_string(), n.as_str().to_string());
+            }
+            with_query(format!("nearx://v1/tx/{tx_hash}"), &q)
+        }
+        Route::V1(RouteV1::Block { block, network }) => {
+            let mut q = BTreeMap::new();
+            if let Some(n) = network {
+                q.insert("network".to_string(), n.as_str().to_string());
+            }
+            with_query(format!("nearx://v1/block/{}", block.as_string()), &q)
+        }
+        Route::V1(RouteV1::Account {
+            account_id,
+            network,
+        }) => {
+            let mut q = BTreeMap::new();
+            if let Some(n) = network {
+                q.insert("network".to_string(), n.as_str().to_string());
+            }
+            with_query(format!("nearx://v1/account/{account_id}"), &q)
+        }
+        Route::V1(RouteV1::Contract {
+            account_id,
+            method,
+            network,
+        }) => {
+            let mut q = BTreeMap::new();
+            if let Some(m) = method {
+                q.insert("method".to_string(), m.clone());
+            }
+            if let Some(n) = network {
+                q.insert("network".to_string(), n.as_str().to_string());
+            }
+            with_query(format!("nearx://v1/contract/{account_id}"), &q)
+        }
+        Route::V1(RouteV1::AccessKey {
+            account_id,
+            public_key,
+            network,
+        }) => {
+            let mut q = BTreeMap::new();
+            if let Some(n) = network {
+                q.insert("network".to_string(), n.as_str().to_string());
+            }
+            with_query(
+                format!("nearx://v1/access-key/{account_id}/{public_key}"),
+                &q,
+            )
+        }
+    }
+}
+
+fn with_query(base: String, query: &BTreeMap<String, String>) -> String {
+    if query.is_empty() {
+        return base;
+    }
+
+    let parts: Vec<String> = query
+        .iter()
+        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+        .collect();
+
+    format!("{base}?{}", parts.join("&"))
 }
 
 #[cfg(test)]
@@ -192,135 +694,134 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_tx() {
-        let route = parse("nearx://v1/tx/ABC123").unwrap();
+    fn parses_canonical_tx_with_query() {
+        let parsed = parse_deep_link(
+            "nearx://v1/tx/6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b?network=mainnet&block=178923456",
+        )
+        .unwrap();
+
         assert_eq!(
-            route,
+            parsed.route,
             Route::V1(RouteV1::Tx {
-                hash: "ABC123".to_string()
+                tx_hash: "6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b".to_string(),
+                block: Some(BlockRef::Height(178_923_456)),
+                network: Some(Network::Mainnet),
             })
         );
 
-        let route = parse("#/v1/tx/DEF456").unwrap();
+        // Query keys canonicalized in lexical order.
         assert_eq!(
-            route,
+            parsed.canonical_uri,
+            "nearx://v1/tx/6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b?block=178923456&network=mainnet"
+        );
+    }
+
+    #[test]
+    fn parses_alias_tx_block_hash_form() {
+        let parsed = parse_deep_link(
+            "nearx://tx/9xQeWvG816bUx9EPf6hQYy7x6jQW2hRymP7vQ3P7Bh6P/6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b",
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.route,
             Route::V1(RouteV1::Tx {
-                hash: "DEF456".to_string()
+                tx_hash: "6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b".to_string(),
+                block: Some(BlockRef::Hash(
+                    "9xQeWvG816bUx9EPf6hQYy7x6jQW2hRymP7vQ3P7Bh6P".to_string(),
+                )),
+                network: None,
             })
         );
 
-        let route = parse("/v1/tx/GHI789").unwrap();
         assert_eq!(
-            route,
-            Route::V1(RouteV1::Tx {
-                hash: "GHI789".to_string()
+            parsed.canonical_uri,
+            "nearx://v1/tx/6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b?block=9xQeWvG816bUx9EPf6hQYy7x6jQW2hRymP7vQ3P7Bh6P"
+        );
+    }
+
+    #[test]
+    fn parses_contract_and_access_key_routes() {
+        let contract = parse_deep_link("nearx://v1/contract/app.near?method=ft_transfer")
+            .unwrap()
+            .route;
+        assert_eq!(
+            contract,
+            Route::V1(RouteV1::Contract {
+                account_id: "app.near".to_string(),
+                method: Some("ft_transfer".to_string()),
+                network: None,
+            })
+        );
+
+        let access_key = parse_deep_link(
+            "nearx://v1/access-key/app.near/ed25519:4NfTivU6N3Wy6u9k8i8w8s8qF2g8Xx1R5zqjYQz6YJ8a",
+        )
+        .unwrap()
+        .route;
+        assert_eq!(
+            access_key,
+            Route::V1(RouteV1::AccessKey {
+                account_id: "app.near".to_string(),
+                public_key: "ed25519:4NfTivU6N3Wy6u9k8i8w8s8qF2g8Xx1R5zqjYQz6YJ8a".to_string(),
+                network: None,
             })
         );
     }
 
     #[test]
-    fn test_parse_block() {
-        let route = parse("nearx://v1/block/12345").unwrap();
-        assert_eq!(route, Route::V1(RouteV1::Block { height: 12345 }));
-
-        let route = parse("#/v1/block/67890").unwrap();
-        assert_eq!(route, Route::V1(RouteV1::Block { height: 67890 }));
+    fn near_scheme_is_compat_input() {
+        let parsed = parse_deep_link("near://block/178923456").unwrap();
+        assert_eq!(
+            parsed.canonical_uri,
+            "nearx://v1/block/178923456".to_string()
+        );
     }
 
     #[test]
-    fn test_parse_account() {
-        let route = parse("nearx://v1/account/alice.near").unwrap();
+    fn parse_accepts_hash_deeplink_wrapper() {
+        let encoded = urlencoding::encode("nearx://v1/home");
+        let route = parse(&format!("#/deeplink/{encoded}")).unwrap();
+        assert_eq!(route, Route::V1(RouteV1::Home));
+    }
+
+    #[test]
+    fn parse_accepts_hash_path_wrapper() {
+        let route = parse("#/v1/account/intents.near").unwrap();
         assert_eq!(
             route,
             Route::V1(RouteV1::Account {
-                id: "alice.near".to_string()
-            })
-        );
-
-        let route = parse("#/v1/account/bob.near").unwrap();
-        assert_eq!(
-            route,
-            Route::V1(RouteV1::Account {
-                id: "bob.near".to_string()
+                account_id: "intents.near".to_string(),
+                network: None,
             })
         );
     }
 
     #[test]
-    fn test_parse_home() {
-        assert_eq!(parse("nearx://v1/home").unwrap(), Route::V1(RouteV1::Home));
-        assert_eq!(parse("nearx://v1/").unwrap(), Route::V1(RouteV1::Home));
-        assert_eq!(parse("nearx://v1").unwrap(), Route::V1(RouteV1::Home));
-        assert_eq!(parse("#/v1/home").unwrap(), Route::V1(RouteV1::Home));
-        assert_eq!(parse("").unwrap(), Route::V1(RouteV1::Home));
+    fn rejects_unknown_query_keys() {
+        let err =
+            parse_deep_link("nearx://v1/tx/6QfQfA6vG8f2hK4M4iXkTgXfWwqkYw1pXnXGkA9m8t9b?foo=bar")
+                .unwrap_err();
+        assert_eq!(err.code(), "ERR_QUERY_KEY");
     }
 
     #[test]
-    fn test_parse_invalid() {
-        assert!(parse("nearx://v2/tx/ABC").is_none()); // Wrong version
-        assert!(parse("nearx://v1/tx/").is_none()); // Missing hash
-        assert!(parse("nearx://v1/block/abc").is_none()); // Invalid height
-        assert!(parse("nearx://v1/unknown/test").is_none()); // Unknown route
+    fn rejects_invalid_identifiers() {
+        let bad_hash = parse_deep_link("nearx://v1/tx/not-a-real-hash").unwrap_err();
+        assert_eq!(bad_hash.code(), "ERR_IDENTIFIER_FORMAT");
+
+        let bad_account = parse_deep_link("nearx://v1/account/Alice.near").unwrap_err();
+        assert_eq!(bad_account.code(), "ERR_IDENTIFIER_FORMAT");
     }
 
     #[test]
-    fn test_parse_case_insensitive_scheme() {
-        // Upper-case scheme
-        let r1 = parse("NEARX://v1/tx/XYZ").unwrap();
-        match r1 {
-            Route::V1(RouteV1::Tx { hash }) => assert_eq!(hash, "XYZ"),
-            _ => panic!("Expected Tx route"),
-        }
-
-        // Mixed case
-        let r2 = parse("NEARx://v1/block/42").unwrap();
-        match r2 {
-            Route::V1(RouteV1::Block { height }) => assert_eq!(height, 42),
-            _ => panic!("Expected Block route"),
-        }
+    fn rejects_wrong_version() {
+        let err = parse_deep_link("nearx://v2/home").unwrap_err();
+        assert_eq!(err.code(), "ERR_VERSION");
     }
 
     #[test]
-    fn test_parse_query_and_fragment() {
-        // Query parameter
-        let r1 = parse("nearx://v1/tx/XYZ?utm=1").unwrap();
-        match r1 {
-            Route::V1(RouteV1::Tx { hash }) => assert_eq!(hash, "XYZ"),
-            _ => panic!("Expected Tx route"),
-        }
-
-        // Fragment
-        let r2 = parse("nearx://v1/block/42#frag").unwrap();
-        match r2 {
-            Route::V1(RouteV1::Block { height }) => assert_eq!(height, 42),
-            _ => panic!("Expected Block route"),
-        }
-
-        // Both query and fragment
-        let r3 = parse("nearx://v1/account/alice.near?ref=ext#test").unwrap();
-        match r3 {
-            Route::V1(RouteV1::Account { id }) => assert_eq!(id, "alice.near"),
-            _ => panic!("Expected Account route"),
-        }
-    }
-
-    #[test]
-    fn test_parse_single_slash_variant() {
-        // Single slash after colon
-        let r = parse("nearx:/v1/tx/ABC").unwrap();
-        match r {
-            Route::V1(RouteV1::Tx { hash }) => assert_eq!(hash, "ABC"),
-            _ => panic!("Expected Tx route"),
-        }
-    }
-
-    #[test]
-    fn test_parse_multiple_slashes() {
-        // Multiple slashes (sometimes happens with URL builders)
-        let r = parse("nearx:////v1/block/123").unwrap();
-        match r {
-            Route::V1(RouteV1::Block { height }) => assert_eq!(height, 123),
-            _ => panic!("Expected Block route"),
-        }
+    fn empty_parse_defaults_to_home_for_ui() {
+        assert_eq!(parse(""), Some(Route::V1(RouteV1::Home)));
     }
 }

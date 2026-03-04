@@ -19,9 +19,8 @@ path = "src/bin/nearx-proxy.rs"
 required-features = ["proxy"]
 
 [[bin]]
-name = "nearx-web-dom"
-path = "src/bin/nearx-web-dom.rs"
-required-features = ["dom-web"]
+name = "nearxd"
+path = "src/bin/nearxd.rs"
 
 [workspace]
 resolver = "2"
@@ -29,6 +28,10 @@ members = [
   ".",                       # nearx root
   "plugins/tx-analyzer",
   "plugins/validator-monitor"
+]
+exclude = [
+  "native-host",
+  "tauri-workspace",
 ]
 
 [workspace.dependencies]
@@ -97,12 +100,14 @@ dom-web = [
 anyhow = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rmp-serde = "1.3"  # MessagePack binary serialization for performance
 toml = "0.8"
 clap = { version = "4.5", features = ["derive", "env"] }
 async-trait = "0.1"
 log = "0.4"
 env_logger = "0.10"
 base64 = "0.22"
+borsh = "1"
 cfg-if = "1"
 urlencoding = "2.1"
 
@@ -175,3 +180,21 @@ web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard", "Pe
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 copypasta = "0.10"
+
+# Production build optimizations
+[profile.release]
+# Optimize for size ("z") instead of speed for WASM bundles
+opt-level = "z"
+# Enable Link Time Optimization for better dead code elimination
+lto = true
+# Use single codegen unit for better optimization (slower compile, smaller binary)
+codegen-units = 1
+# Strip debug symbols from binary
+strip = true
+# Abort on panic instead of unwinding (smaller WASM)
+panic = "abort"
+
+# Release profile for WASM specifically
+[profile.release.package."*"]
+opt-level = "z"
+strip = true

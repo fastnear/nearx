@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #ffffff;
+}
+
+.dark {
+  color-scheme: dark;
+  --color-surface: oklch(0.205 0.015 264);
+
+  /* Backgrounds: invert the gray scale */
+  --color-gray-50: oklch(0.145 0.014 264);
+  --color-gray-100: oklch(0.27 0.015 264);
+  --color-gray-200: oklch(0.37 0.013 264);
+  --color-gray-300: oklch(0.44 0.012 264);
+
+  /* Text: invert */
+  --color-gray-900: oklch(0.96 0.005 264);
+  --color-gray-800: oklch(0.93 0.005 264);
+  --color-gray-700: oklch(0.87 0.008 264);
+  --color-gray-600: oklch(0.72 0.010 264);
+  --color-gray-500: oklch(0.55 0.012 264);
+  --color-gray-400: oklch(0.44 0.012 264);
+
+  /* Blues: brighter for dark bg readability */
+  --color-blue-500: oklch(0.70 0.18 255);
+  --color-blue-600: oklch(0.65 0.19 255);
+  --color-blue-700: oklch(0.55 0.19 255);
+  --color-blue-800: oklch(0.50 0.18 255);
+
+  /* Reds */
+  --color-red-50: oklch(0.25 0.06 25);
+  --color-red-500: oklch(0.68 0.19 25);
+  --color-red-600: oklch(0.65 0.20 25);
+  --color-red-700: oklch(0.62 0.19 25);
+
+  /* Green / Purple */
+  --color-green-600: oklch(0.68 0.17 145);
+  --color-purple-700: oklch(0.70 0.16 295);
+}

@@ -11,7 +11,9 @@ dist/  # Legacy Trunk output (should not exist, but ignore just in case)
 dist-*/  # Legacy dist variants (dist-dom, dist-egui, etc.)
 
 # Archive (old .bak files, legacy code)
-archive/
+archive/*
+!archive/legacy-web-dom/
+!archive/legacy-web-dom/**
 
 # IDE / OS
 .idea/
@@ -32,6 +34,8 @@ nearx_debug.log
 
 # Playwright E2E artifacts
 node_modules/
+.yarn/install-state.gz
+
 test-results/
 playwright-report/
 playwright/.cache/
@@ -45,6 +49,8 @@ playwright/.cache/
 *_COMPARISON.md
 *_QUICK_TEST.md
 *_QUICK_START.md
+!EXTENSION_SETUP.md
+!DEEP_LINK_QUICK_TEST.md
 SESSION_*.md
 PE_PASS_*.md
 

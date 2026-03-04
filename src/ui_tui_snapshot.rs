@@ -32,11 +32,7 @@ pub fn draw_from_snapshot(f: &mut Frame, area: Rect, snapshot: &UiSnapshot, _the
 
         let warning = Paragraph::new(warning_text)
             .alignment(ratatui::layout::Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -198,10 +194,7 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
         .blocks
         .iter()
         .map(|b| {
-            let text = format!(
-                "#{}  | {} txs | {}",
-                b.height, b.tx_count, b.when
-            );
+            let text = format!("#{}  | {} txs | {}", b.height, b.tx_count, b.when);
             let item = ListItem::new(text);
             if b.available {
                 item
@@ -214,7 +207,11 @@ fn render_blocks_pane(f: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
     let title = if snapshot.viewing_cached {
         " Blocks (cached) · ← Recent ".to_string()
     } else if !items.is_empty() && snapshot.blocks.len() < snapshot.blocks_total {
-        format!(" Blocks ({} / {}) ", snapshot.blocks.len(), snapshot.blocks_total)
+        format!(
+            " Blocks ({} / {}) ",
+            snapshot.blocks.len(),
+            snapshot.blocks_total
+        )
     } else {
         " Blocks ".to_string()
     };
@@ -255,11 +252,7 @@ fn render_txs_pane(f: &mut Frame, area: Rect, snapshot: &UiSnapshot) {
 
     let mut state = ListState::default();
     if !snapshot.txs.is_empty() {
-        if let Some(sel_idx) = snapshot
-            .txs
-            .iter()
-            .position(|t: &UiTxRow| t.is_selected)
-        {
+        if let Some(sel_idx) = snapshot.txs.iter().position(|t: &UiTxRow| t.is_selected) {
             state.select(Some(sel_idx));
         }
     }
@@ -352,19 +345,17 @@ fn render_details_pane(f: &mut Frame, area: Rect, snapshot: &UiSnapshot, theme: 
     let paragraph = if !is_loading {
         // JSON syntax highlighting via colorize_json
         let lines = colorize_json(&snapshot.details, theme);
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(if details_focused {
-                        title.yellow().bold()
-                    } else {
-                        title.into()
-                    })
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(border_color)),
-            )
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .title(if details_focused {
+                    title.yellow().bold()
+                } else {
+                    title.into()
+                })
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border_color)),
+        )
     } else {
         // Loading state: plain text
         Paragraph::new(snapshot.details.as_str())

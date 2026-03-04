@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Ratacat Connector",
+  "name": "NEARx Connector",
   "version": "0.1.0",
-  "description": "Bridge between browser and Ratacat via Native Messaging",
+  "description": "Bridge between browser and NEARx via Native Messaging",
   "background": {
     "service_worker": "background.js"
   },

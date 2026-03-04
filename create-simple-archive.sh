@@ -33,6 +33,7 @@ zip -r "${ARCHIVE_NAME}" . \
     -x "dist-dom/*" \
     -x "dist-egui/*" \
     -x "node_modules/*" \
+    -x "*/node_modules/*" \
     -x "web/pkg/*" \
     -x ".env" \
     -x "Trunk.toml" \
