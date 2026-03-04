@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import SearchBar from "./SearchBar";
-import { ChevronDown, Sun, Moon, Monitor } from "lucide-react";
+import { ChevronDown, Sun, Moon, Monitor, Fingerprint, PenTool } from "lucide-react";
 import { networkId, otherNetworkId } from "../config";
 import { buildCrossNetworkUrl } from "../utils/networkRouting";
+import { isTauriRuntime, requestUserPresence } from "../tauri/runtime";
+import type { UserPresenceResult } from "../tauri/runtime";
 import logoSvg from "../assets/logo.svg";
 
 function NetworkSwitcher({ switchUrl }: { switchUrl: string }) {
@@ -106,6 +108,46 @@ function ThemeToggle() {
   );
 }
 
+function FingerprintButton() {
+  const [state, setState] = useState<"idle" | "pending" | "verified" | "denied">("idle");
+
+  const handleClick = useCallback(async () => {
+    console.log("[FingerprintButton] clicked, calling requestUserPresence...");
+    setState("pending");
+    try {
+      const result: UserPresenceResult = await requestUserPresence("NEARx fingerprint test");
+      console.log("[FingerprintButton] result:", JSON.stringify(result));
+      setState(result.verified ? "verified" : "denied");
+    } catch (err) {
+      console.error("[FingerprintButton] error:", err);
+      setState("denied");
+    }
+    setTimeout(() => setState("idle"), 2000);
+  }, []);
+
+  const color =
+    state === "verified" ? "text-green-600" :
+    state === "denied" ? "text-red-500" :
+    state === "pending" ? "text-yellow-500 animate-pulse" :
+    "text-gray-600";
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={state === "pending"}
+      className={`flex items-center justify-center rounded bg-gray-100 p-1.5 cursor-pointer hover:bg-gray-200 ${color}`}
+      title={
+        state === "verified" ? "Verified" :
+        state === "denied" ? "Denied" :
+        state === "pending" ? "Waiting..." :
+        "Test Touch ID"
+      }
+    >
+      <Fingerprint className="size-3.5" />
+    </button>
+  );
+}
+
 export default function Layout() {
   const location = useLocation();
   const switchUrl = useMemo(
@@ -130,6 +172,16 @@ export default function Layout() {
           </Link>
           <NetworkSwitcher switchUrl={switchUrl} />
           <ThemeToggle />
+          {isTauriRuntime() && <FingerprintButton />}
+          {isTauriRuntime() && (
+            <Link
+              to="/sign"
+              className="flex items-center justify-center rounded bg-gray-100 p-1.5 text-gray-600 hover:bg-gray-200"
+              title="Sign Transaction"
+            >
+              <PenTool className="size-3.5" />
+            </Link>
+          )}
           <div className="w-full sm:w-auto sm:flex-1 order-last sm:order-none">
             <SearchBar />
           </div>

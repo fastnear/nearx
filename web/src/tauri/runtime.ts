@@ -60,6 +60,95 @@ export async function openExternal(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+export interface UserPresenceResult {
+  verified: boolean;
+  platform: string;
+  modality: string;
+  adapter: string;
+}
+
+export async function requestUserPresence(reason?: string): Promise<UserPresenceResult> {
+  return invoke<UserPresenceResult>("request_user_presence", { reason });
+}
+
+export interface NearCredentialEntry {
+  account_id: string;
+  public_key: string;
+  in_keychain?: boolean;
+}
+
+export interface ListNearCredentialsResult {
+  network: string;
+  credentials_dir: string;
+  accounts: NearCredentialEntry[];
+}
+
+export async function listNearCredentials(
+  network: string,
+): Promise<ListNearCredentialsResult> {
+  return invoke<ListNearCredentialsResult>("list_near_credentials", {
+    network,
+  });
+}
+
+export interface ImportNearCredentialsParams {
+  network: string;
+  account_id?: string;
+  require_user_presence?: boolean;
+  persist_in_keychain?: boolean;
+}
+
+export interface ImportedCredential {
+  account_id: string;
+  public_key: string;
+  keychain_status?: string;
+}
+
+export interface ImportNearCredentialsResult {
+  network: string;
+  imported_count: number;
+  imported: ImportedCredential[];
+  skipped: ImportedCredential[];
+  failed: Array<{ account_id: string; error: string }>;
+}
+
+export async function importNearCredentials(
+  params: ImportNearCredentialsParams,
+): Promise<ImportNearCredentialsResult> {
+  return invoke<ImportNearCredentialsResult>("import_near_credentials", {
+    params,
+  });
+}
+
+export interface SignTransactionParams {
+  signer_id: string;
+  receiver_id: string;
+  nonce: number;
+  block_hash: string;
+  actions: Array<{
+    type: string;
+    deposit?: string;
+    method_name?: string;
+    args?: string;
+    gas?: number;
+  }>;
+  network?: string;
+  reason?: string;
+}
+
+export interface SignTransactionResult {
+  signed_transaction_base64: string;
+  tx_hash: string;
+  signer_id: string;
+  public_key: string;
+}
+
+export async function signTransaction(
+  params: SignTransactionParams,
+): Promise<SignTransactionResult> {
+  return invoke<SignTransactionResult>("sign_transaction", { params });
+}
+
 export async function subscribeDeepLinks(
   onUrl: (url: string) => void,
 ): Promise<() => void> {

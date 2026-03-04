@@ -141,11 +141,13 @@ Implemented methods:
 - `request_user_presence`
 - `get_signing_settings`
 - `set_signing_settings`
+- `list_near_credentials`
 - `import_near_credentials`
 - `get_near_credential`
 - `create_sign_intent`
 - `approve_sign_intent`
 - `consume_sign_intent`
+- `sign_transaction`
 
 ### 6.2 Token Resolution And Persistence
 

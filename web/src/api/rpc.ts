@@ -55,6 +55,67 @@ export async function viewAccount(
   };
 }
 
+export interface AccessKeyView {
+  nonce: number;
+  block_hash: string;
+  permission: unknown;
+}
+
+export async function viewAccessKey(
+  accountId: string,
+  publicKey: string,
+  signal?: AbortSignal,
+): Promise<AccessKeyView> {
+  const rpcUrl = await getNearNodeUrl(DEFAULT_RPC_URL);
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "1",
+      method: "query",
+      params: {
+        request_type: "view_access_key",
+        finality: "final",
+        account_id: accountId,
+        public_key: publicKey,
+      },
+    }),
+    signal,
+  });
+  const json = await res.json();
+  if (json.error) {
+    throw new Error(json.error.message ?? JSON.stringify(json.error));
+  }
+  const r = json.result;
+  return {
+    nonce: r.nonce,
+    block_hash: r.block_hash,
+    permission: r.permission,
+  };
+}
+
+export async function broadcastTransaction(
+  signedTxBase64: string,
+): Promise<unknown> {
+  const rpcUrl = await getNearNodeUrl(DEFAULT_RPC_URL);
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "1",
+      method: "broadcast_tx_commit",
+      params: [signedTxBase64],
+    }),
+  });
+  const json = await res.json();
+  if (json.error) {
+    throw new Error(json.error.message ?? JSON.stringify(json.error));
+  }
+  return json.result;
+}
+
 export async function viewCall<T>(
   contractId: string,
   methodName: string,

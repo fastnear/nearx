@@ -2258,6 +2258,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "borsh",
  "cfg-if",
  "chrono",
  "clap",

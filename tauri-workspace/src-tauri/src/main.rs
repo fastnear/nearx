@@ -123,6 +123,71 @@ pub(crate) fn canonicalize_deep_link(raw: &str) -> Option<String> {
 }
 
 #[tauri::command]
+async fn request_user_presence(reason: Option<String>) -> Result<Value, String> {
+    let reason_str = reason.unwrap_or_else(|| "NEARx authentication".to_string());
+    log::info!("[request_user_presence] calling nearxd with reason={reason_str:?}");
+    match nearxd_request(
+        "request_user_presence",
+        json!({
+            "reason": reason_str,
+            "allow_fallback": true
+        }),
+    ) {
+        Ok(val) => {
+            log::info!("[request_user_presence] success: {val}");
+            Ok(val)
+        }
+        Err(e) => {
+            log::error!("[request_user_presence] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn list_near_credentials(network: String) -> Result<Value, String> {
+    log::info!("[list_near_credentials] network={network}");
+    match nearxd_request("list_near_credentials", json!({ "network": network })) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            log::error!("[list_near_credentials] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn import_near_credentials(params: Value) -> Result<Value, String> {
+    log::info!("[import_near_credentials] params: {params}");
+    match nearxd_request("import_near_credentials", params) {
+        Ok(val) => {
+            log::info!("[import_near_credentials] success: {val}");
+            Ok(val)
+        }
+        Err(e) => {
+            log::error!("[import_near_credentials] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn sign_transaction(params: Value) -> Result<Value, String> {
+    log::info!("[sign_transaction] params: {params}");
+    match nearxd_request("sign_transaction", params) {
+        Ok(val) => {
+            // Don't log success payload (may contain sensitive data)
+            log::info!("[sign_transaction] success (tx_hash={})", val.get("tx_hash").and_then(|v| v.as_str()).unwrap_or("?"));
+            Ok(val)
+        }
+        Err(e) => {
+            log::error!("[sign_transaction] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -203,6 +268,10 @@ fn main() {
         builder = builder.invoke_handler(tauri::generate_handler![
             open_external,
             get_runtime_config,
+            request_user_presence,
+            list_near_credentials,
+            import_near_credentials,
+            sign_transaction,
             test_api::nearx_test_emit_deeplink,
             test_api::nearx_test_roundtrip_deeplink,
             test_api::nearx_test_get_last_route,
@@ -213,7 +282,7 @@ fn main() {
     #[cfg(not(feature = "e2e"))]
     {
         builder =
-            builder.invoke_handler(tauri::generate_handler![open_external, get_runtime_config]);
+            builder.invoke_handler(tauri::generate_handler![open_external, get_runtime_config, request_user_presence, list_near_credentials, import_near_credentials, sign_transaction]);
     }
 
     builder

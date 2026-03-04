@@ -18,7 +18,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use near_crypto::{PublicKey, SecretKey};
+use near_primitives::action::{Action, FunctionCallAction, TransferAction};
+use near_primitives::hash::CryptoHash;
+use near_primitives::transaction::{SignedTransaction, Transaction, TransactionV0};
+use near_primitives::types::AccountId;
 use rand::RngCore;
 
 #[cfg(unix)]
@@ -240,6 +245,64 @@ fn parse_optional_bool(params: &Value, key: &str) -> Option<bool> {
     params.get(key).and_then(Value::as_bool)
 }
 
+fn parse_near_actions(actions_json: &[Value]) -> Result<Vec<Action>, String> {
+    let mut actions = Vec::with_capacity(actions_json.len());
+    for (i, a) in actions_json.iter().enumerate() {
+        let action_type = a
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("action[{i}]: missing 'type' string"))?;
+        match action_type {
+            "Transfer" => {
+                let deposit_str = a
+                    .get("deposit")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("action[{i}]: Transfer requires 'deposit' string"))?;
+                let deposit: u128 = deposit_str
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid deposit: {e}"))?;
+                actions.push(Action::Transfer(TransferAction { deposit }));
+            }
+            "FunctionCall" => {
+                let method_name = a
+                    .get("method_name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("action[{i}]: FunctionCall requires 'method_name' string")
+                    })?
+                    .to_string();
+                let args_b64 = a.get("args").and_then(Value::as_str).unwrap_or("");
+                let args = STANDARD
+                    .decode(args_b64)
+                    .map_err(|e| format!("action[{i}]: invalid base64 args: {e}"))?;
+                let gas = a
+                    .get("gas")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30_000_000_000_000); // 30 TGas default
+                let deposit_str = a
+                    .get("deposit")
+                    .and_then(Value::as_str)
+                    .unwrap_or("0");
+                let deposit: u128 = deposit_str
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid deposit: {e}"))?;
+                actions.push(Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name,
+                    args,
+                    gas,
+                    deposit,
+                })));
+            }
+            other => {
+                return Err(format!(
+                    "action[{i}]: unsupported action type '{other}' (supported: Transfer, FunctionCall)"
+                ));
+            }
+        }
+    }
+    Ok(actions)
+}
+
 fn home_dir() -> Option<PathBuf> {
     env::var("HOME")
         .ok()
@@ -438,13 +501,34 @@ fn keychain_delete_generic(service: &str, account: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn keychain_has_generic(service: &str, account: &str) -> bool {
-    use std::process::Command;
+    let script = r#"
+import Foundation
+import Security
 
-    Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", account])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+let service = CommandLine.arguments[1]
+let account = CommandLine.arguments[2]
+
+let query: [String: Any] = [
+    kSecClass as String: kSecClassGenericPassword,
+    kSecAttrService as String: service,
+    kSecAttrAccount as String: account,
+    kSecReturnAttributes as String: true,
+    kSecMatchLimit as String: kSecMatchLimitOne
+]
+
+let status = SecItemCopyMatching(query as CFDictionary, nil)
+if status == errSecSuccess {
+    print("{\"found\":true}")
+    exit(0)
+}
+print("{\"found\":false}")
+exit(0)
+"#;
+
+    match run_swift_json(script, &[service, account]) {
+        Ok(v) => v.get("found").and_then(Value::as_bool).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -612,14 +696,6 @@ let account = CommandLine.arguments[2]
 let value = CommandLine.arguments[3]
 let biometryOnly = CommandLine.arguments.count > 4 ? (CommandLine.arguments[4] == "1") : true
 
-let flags: SecAccessControlCreateFlags = biometryOnly ? .biometryCurrentSet : .userPresence
-var acError: Unmanaged<CFError>?
-guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &acError) else {
-    let msg = acError?.takeRetainedValue().localizedDescription ?? "failed to create access control"
-    fputs(msg, stderr)
-    exit(2)
-}
-
 guard let data = value.data(using: .utf8) else {
     fputs("failed to encode value", stderr)
     exit(2)
@@ -632,26 +708,56 @@ let deleteQuery: [String: Any] = [
 ]
 SecItemDelete(deleteQuery as CFDictionary)
 
-let addQuery: [String: Any] = [
+// Try protected write (requires code-signed binary with entitlements)
+let flags: SecAccessControlCreateFlags = biometryOnly ? .biometryCurrentSet : .userPresence
+var acError: Unmanaged<CFError>?
+if let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &acError) {
+    let addQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: account,
+        kSecValueData as String: data,
+        kSecAttrAccessControl as String: access
+    ]
+    let status = SecItemAdd(addQuery as CFDictionary, nil)
+    if status == errSecSuccess {
+        let out: [String: Any] = [
+            "stored": true,
+            "protection": biometryOnly ? "biometry_current_set" : "user_presence"
+        ]
+        let json = try JSONSerialization.data(withJSONObject: out, options: [])
+        print(String(data: json, encoding: .utf8)!)
+        exit(0)
+    }
+    // -34018 = errSecMissingEntitlement — binary not code-signed for protected keychain
+    if status != -34018 {
+        fputs("SecItemAdd failed with status \(status)", stderr)
+        exit(3)
+    }
+    fputs("Protected SecItemAdd failed (-34018), falling back to unprotected keychain\n", stderr)
+}
+
+// Fallback: store without biometry protection (works for unsigned CLI binaries)
+let fallbackQuery: [String: Any] = [
     kSecClass as String: kSecClassGenericPassword,
     kSecAttrService as String: service,
     kSecAttrAccount as String: account,
     kSecValueData as String: data,
-    kSecAttrAccessControl as String: access
+    kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
 ]
-
-let status = SecItemAdd(addQuery as CFDictionary, nil)
-if status == errSecSuccess {
+let fallbackStatus = SecItemAdd(fallbackQuery as CFDictionary, nil)
+if fallbackStatus == errSecSuccess {
     let out: [String: Any] = [
         "stored": true,
-        "protection": biometryOnly ? "biometry_current_set" : "user_presence"
+        "protection": "when_unlocked",
+        "fallback": true
     ]
     let json = try JSONSerialization.data(withJSONObject: out, options: [])
     print(String(data: json, encoding: .utf8)!)
     exit(0)
 }
 
-fputs("SecItemAdd failed with status \(status)", stderr)
+fputs("SecItemAdd fallback also failed with status \(fallbackStatus)", stderr)
 exit(3)
 "#;
 
@@ -676,10 +782,14 @@ fn keychain_read_generic_with_prompt(
     let script = r#"
 import Foundation
 import Security
+import LocalAuthentication
 
 let service = CommandLine.arguments[1]
 let account = CommandLine.arguments[2]
 let reason = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "Authenticate to continue"
+
+let context = LAContext()
+context.localizedReason = reason
 
 let query: [String: Any] = [
     kSecClass as String: kSecClassGenericPassword,
@@ -687,7 +797,7 @@ let query: [String: Any] = [
     kSecAttrAccount as String: account,
     kSecReturnData as String: true,
     kSecMatchLimit as String: kSecMatchLimitOne,
-    kSecUseOperationPrompt as String: reason
+    kSecUseAuthenticationContext as String: context
 ]
 
 var item: CFTypeRef?
@@ -1005,6 +1115,23 @@ fn parse_near_credential(path: &Path) -> Result<ParsedNearCredential, String> {
         public_key,
         private_key,
     })
+}
+
+fn list_credential_summary(path: &Path) -> Result<(String, String), String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let parsed: NearCredentialFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let fallback = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let account_id = parsed.account_id.unwrap_or(fallback).trim().to_string();
+    let public_key = parsed.public_key.unwrap_or_default().trim().to_string();
+    if account_id.is_empty() || public_key.is_empty() {
+        return Err("missing account_id or public_key".to_string());
+    }
+    Ok((account_id, public_key))
 }
 
 fn collect_credential_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -1439,6 +1566,84 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
                 ),
                 Err(e) => BrokerResponse::err(id, "ERR_PERSIST", e),
             }
+        }
+
+        "list_near_credentials" => {
+            let network = parse_string(&req.params, "network")
+                .unwrap_or("mainnet")
+                .trim()
+                .to_ascii_lowercase();
+            if network.is_empty() {
+                return BrokerResponse::err(id, "ERR_PARAMS", "network cannot be empty");
+            }
+
+            let credentials_dir = if let Some(raw) = parse_string(&req.params, "credentials_dir") {
+                expand_tilde_path(raw)
+            } else {
+                match near_credentials_dir(&network) {
+                    Some(p) => p,
+                    None => {
+                        return BrokerResponse::ok(
+                            id,
+                            json!({
+                                "network": network,
+                                "credentials_dir": "~/.near-credentials/".to_string() + &network,
+                                "accounts": [],
+                            }),
+                        );
+                    }
+                }
+            };
+
+            let dir_display = credentials_dir.display().to_string();
+
+            if !credentials_dir.exists() {
+                return BrokerResponse::ok(
+                    id,
+                    json!({
+                        "network": network,
+                        "credentials_dir": dir_display,
+                        "accounts": [],
+                    }),
+                );
+            }
+
+            let files = match collect_credential_files(&credentials_dir) {
+                Ok(f) => f,
+                Err(_) => {
+                    return BrokerResponse::ok(
+                        id,
+                        json!({
+                            "network": network,
+                            "credentials_dir": dir_display,
+                            "accounts": [],
+                        }),
+                    );
+                }
+            };
+
+            let mut accounts = Vec::new();
+            for file in &files {
+                if let Ok((account_id, public_key)) = list_credential_summary(file) {
+                    let keychain_account = format!("{network}:{account_id}");
+                    let in_keychain =
+                        keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &keychain_account);
+                    accounts.push(json!({
+                        "account_id": account_id,
+                        "public_key": public_key,
+                        "in_keychain": in_keychain,
+                    }));
+                }
+            }
+
+            BrokerResponse::ok(
+                id,
+                json!({
+                    "network": network,
+                    "credentials_dir": dir_display,
+                    "accounts": accounts,
+                }),
+            )
         }
 
         "import_near_credentials" => {
@@ -1906,6 +2111,181 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
                     "user_presence_verified": intent.user_presence_verified,
                     "user_presence_modality": intent.user_presence_modality,
                     "status": "consumed",
+                }),
+            )
+        }
+
+        "sign_transaction" => {
+            // Parse signer_id
+            let Some(signer_id_str) = parse_string(&req.params, "signer_id") else {
+                return BrokerResponse::err(
+                    id,
+                    "ERR_PARAMS",
+                    "missing required string param: signer_id",
+                );
+            };
+            let signer_id: AccountId = match signer_id_str.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_PARAMS",
+                        format!("invalid signer_id: {e}"),
+                    )
+                }
+            };
+
+            // Parse receiver_id
+            let Some(receiver_id_str) = parse_string(&req.params, "receiver_id") else {
+                return BrokerResponse::err(
+                    id,
+                    "ERR_PARAMS",
+                    "missing required string param: receiver_id",
+                );
+            };
+            let receiver_id: AccountId = match receiver_id_str.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_PARAMS",
+                        format!("invalid receiver_id: {e}"),
+                    )
+                }
+            };
+
+            // Parse nonce
+            let nonce = req
+                .params
+                .get("nonce")
+                .and_then(Value::as_u64)
+                .ok_or("missing required param: nonce");
+            let nonce = match nonce {
+                Ok(v) => v,
+                Err(e) => return BrokerResponse::err(id, "ERR_PARAMS", e),
+            };
+
+            // Parse block_hash (base58)
+            let Some(block_hash_str) = parse_string(&req.params, "block_hash") else {
+                return BrokerResponse::err(
+                    id,
+                    "ERR_PARAMS",
+                    "missing required string param: block_hash",
+                );
+            };
+            let block_hash: CryptoHash = match block_hash_str.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_PARAMS",
+                        format!("invalid block_hash (expected base58): {e}"),
+                    )
+                }
+            };
+
+            // Parse actions array
+            let actions_arr = match req.params.get("actions").and_then(Value::as_array) {
+                Some(arr) if !arr.is_empty() => arr,
+                _ => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_PARAMS",
+                        "missing or empty 'actions' array",
+                    )
+                }
+            };
+            let actions = match parse_near_actions(actions_arr) {
+                Ok(v) => v,
+                Err(e) => return BrokerResponse::err(id, "ERR_PARAMS", e),
+            };
+
+            // Read credential from keychain (triggers Touch ID)
+            let network = parse_string(&req.params, "network")
+                .unwrap_or("mainnet")
+                .to_ascii_lowercase();
+            let reason = parse_string(&req.params, "reason")
+                .unwrap_or("NEARx needs your approval to sign a transaction.");
+            let credential =
+                match read_near_credential_keychain(&network, signer_id_str, reason) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return BrokerResponse::err(
+                            id,
+                            "ERR_AUTH",
+                            format!("credential read failed: {e}"),
+                        )
+                    }
+                };
+
+            // Extract and parse private key
+            let Some(private_key_str) = credential.get("private_key").and_then(Value::as_str)
+            else {
+                return BrokerResponse::err(
+                    id,
+                    "ERR_AUTH",
+                    "credential missing 'private_key' field",
+                );
+            };
+            let secret_key: SecretKey = match private_key_str.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_AUTH",
+                        format!("invalid private key format: {e}"),
+                    )
+                }
+            };
+
+            // Extract and parse public key
+            let public_key: PublicKey = match credential
+                .get("public_key")
+                .and_then(Value::as_str)
+                .map(str::parse)
+            {
+                Some(Ok(v)) => v,
+                _ => {
+                    // Derive from secret key if not stored
+                    secret_key.public_key()
+                }
+            };
+
+            // Build transaction
+            let tx = Transaction::V0(TransactionV0 {
+                signer_id: signer_id.clone(),
+                public_key: public_key.clone(),
+                nonce,
+                receiver_id: receiver_id.clone(),
+                block_hash,
+                actions,
+            });
+
+            // Sign
+            let (tx_hash, _size) = tx.get_hash_and_size();
+            let signature = secret_key.sign(tx_hash.as_ref());
+            let signed_tx = SignedTransaction::new(signature, tx);
+
+            // Serialize to borsh -> base64
+            let borsh_bytes = match borsh::to_vec(&signed_tx) {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_INTERNAL",
+                        format!("borsh serialization failed: {e}"),
+                    )
+                }
+            };
+            let signed_tx_b64 = STANDARD.encode(&borsh_bytes);
+
+            BrokerResponse::ok(
+                id,
+                json!({
+                    "signed_transaction_base64": signed_tx_b64,
+                    "tx_hash": tx_hash.to_string(),
+                    "signer_id": signer_id.to_string(),
+                    "public_key": public_key.to_string(),
                 }),
             )
         }

@@ -54,8 +54,9 @@ User-presence and signing settings:
 - `get_signing_settings`
 - `set_signing_settings`
 
-Credential import:
+Credential discovery and import:
 
+- `list_near_credentials`
 - `import_near_credentials`
 - `get_near_credential`
 
@@ -64,6 +65,10 @@ Sign intent:
 - `create_sign_intent`
 - `approve_sign_intent`
 - `consume_sign_intent`
+
+Transaction signing:
+
+- `sign_transaction`
 
 ## Storage Backends
 
@@ -189,6 +194,35 @@ Output:
 }
 ```
 
+### `list_near_credentials`
+
+Lists available credential accounts from `~/.near-credentials/<network>` (or custom dir). Returns account IDs and public keys only — never exposes private keys. Returns an empty accounts array (not an error) when the directory does not exist or contains no parseable credentials.
+
+Input:
+
+```json
+{
+  "network": "mainnet",
+  "credentials_dir": "~/.near-credentials/mainnet"
+}
+```
+
+- `network` — optional, defaults to `"mainnet"`
+- `credentials_dir` — optional, overrides default `~/.near-credentials/<network>`
+
+Output:
+
+```json
+{
+  "network": "mainnet",
+  "credentials_dir": "/Users/alice/.near-credentials/mainnet",
+  "accounts": [
+    { "account_id": "alice.near", "public_key": "ed25519:..." },
+    { "account_id": "bob.near", "public_key": "ed25519:..." }
+  ]
+}
+```
+
 ### `import_near_credentials`
 
 Imports credentials from `~/.near-credentials/<network>` (or custom dir), optionally requiring user presence and persisting keys to keychain.
@@ -285,6 +319,40 @@ Output (shape):
 - `user_presence_reason` (string, optional)
 
 When enabled, `approve_sign_intent` performs user-presence verification before setting `status=approved`.
+
+### `sign_transaction`
+
+Signs a NEAR transaction using a credential stored in the macOS keychain (triggers Touch ID).
+
+Request params:
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `signer_id` | string | yes | NEAR account ID of the signer |
+| `receiver_id` | string | yes | NEAR account ID of the receiver |
+| `nonce` | u64 | yes | Access key nonce (typically `current_nonce + 1`) |
+| `block_hash` | string | yes | Recent block hash (base58) |
+| `actions` | array | yes | Array of action objects (see below) |
+| `network` | string | no | `"mainnet"` or `"testnet"` (default: `"mainnet"`) |
+| `reason` | string | no | Touch ID prompt reason |
+
+Action types:
+
+- `{"type": "Transfer", "deposit": "<yoctoNEAR>"}` — native NEAR transfer
+- `{"type": "FunctionCall", "method_name": "...", "args": "<base64>", "gas": <u64>, "deposit": "<yoctoNEAR>"}` — contract call (gas defaults to 30 TGas, deposit defaults to "0")
+
+Response:
+
+```json
+{
+  "signed_transaction_base64": "...",
+  "tx_hash": "<base58>",
+  "signer_id": "alice.near",
+  "public_key": "ed25519:..."
+}
+```
+
+The `signed_transaction_base64` is borsh-serialized, ready for `broadcast_tx_commit`.
 
 ## Native Host and Tauri Integration
 
