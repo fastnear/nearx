@@ -1298,6 +1298,15 @@ impl App {
                 self.return_to_auto_follow();
                 self.log_debug("Route: home".to_string());
             }
+            Route::V1(RouteV1::Staking {
+                account_id,
+                network,
+            }) => {
+                // Staking is web/Tauri-only; TUI ignores this route
+                self.log_debug(format!(
+                    "Route: staking account={account_id:?} network={network:?} (ignored in TUI)"
+                ));
+            }
         }
     }
 

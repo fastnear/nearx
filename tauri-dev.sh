@@ -188,6 +188,16 @@ mkdir -p "$BUNDLE_RESOURCES"
 echo "  Copying binary..."
 cp "tauri-workspace/target/debug/$BINARY_NAME" "$BUNDLE_MACOS/"
 
+# Copy nearxd sidecar if available
+TARGET_TRIPLE=$(rustc --print host-tuple 2>/dev/null || echo "")
+SIDECAR_PATH="tauri-workspace/src-tauri/binaries/nearxd-$TARGET_TRIPLE"
+if [[ -n "$TARGET_TRIPLE" && -f "$SIDECAR_PATH" ]]; then
+    echo "  Copying nearxd sidecar..."
+    cp "$SIDECAR_PATH" "$BUNDLE_MACOS/"
+else
+    echo "  No nearxd sidecar found (run 'make sidecar' first for bundled broker)"
+fi
+
 # Create Info.plist
 echo "  Creating Info.plist..."
 cat > "$BUNDLE_CONTENTS/Info.plist" <<EOF

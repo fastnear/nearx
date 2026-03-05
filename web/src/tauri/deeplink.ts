@@ -48,6 +48,12 @@ export function mapCanonicalDeepLinkToRoute(rawUrl: string): string | null {
         ? `/account/${encodeURIComponent(accountId)}`
         : null;
     }
+    case "staking": {
+      const accountId = url.searchParams.get("account");
+      return accountId
+        ? `/staking?account=${encodeURIComponent(accountId)}`
+        : "/staking";
+    }
     default:
       return null;
   }

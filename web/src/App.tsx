@@ -13,6 +13,7 @@ import BlockDetail from "./pages/BlockDetail";
 import TxDetail from "./pages/TxDetail";
 import AccountDetail from "./pages/AccountDetail";
 import SignTransaction from "./pages/SignTransaction";
+import Staking from "./pages/Staking";
 import { mapCanonicalDeepLinkToRoute } from "./tauri/deeplink";
 import {
   getRuntimeConfig,
@@ -138,6 +139,9 @@ function ExplorerRoutes() {
         <Route path="account/:accountId" element={<AccountDetail />} />
         {isTauriRuntime() && (
           <Route path="sign" element={<SignTransaction />} />
+        )}
+        {isTauriRuntime() && (
+          <Route path="staking" element={<Staking />} />
         )}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

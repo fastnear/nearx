@@ -80,6 +80,10 @@ pub enum RouteV1 {
         public_key: String,
         network: Option<Network>,
     },
+    Staking {
+        account_id: Option<String>,
+        network: Option<Network>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -390,6 +394,21 @@ fn parse_v1_canonical(
                 network,
             })
         }
+        "staking" => {
+            ensure_segment_len(segments, &[2])?;
+            ensure_query_keys(query, &["account", "network"])?;
+
+            let account_id = query.get("account").cloned();
+            if let Some(ref aid) = account_id {
+                validate_account_id(aid)?;
+            }
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Staking {
+                account_id,
+                network,
+            })
+        }
         _ => Err(ParseError::Route),
     }
 }
@@ -487,6 +506,21 @@ fn parse_v1_alias(
             Ok(RouteV1::AccessKey {
                 account_id,
                 public_key,
+                network,
+            })
+        }
+        "staking" => {
+            ensure_segment_len(segments, &[1])?;
+            ensure_query_keys(query, &["account", "network"])?;
+
+            let account_id = query.get("account").cloned();
+            if let Some(ref aid) = account_id {
+                validate_account_id(aid)?;
+            }
+            let network = parse_network_query(query)?;
+
+            Ok(RouteV1::Staking {
+                account_id,
                 network,
             })
         }
@@ -673,6 +707,19 @@ fn canonical_uri(route: &Route) -> String {
                 &q,
             )
         }
+        Route::V1(RouteV1::Staking {
+            account_id,
+            network,
+        }) => {
+            let mut q = BTreeMap::new();
+            if let Some(a) = account_id {
+                q.insert("account".to_string(), a.clone());
+            }
+            if let Some(n) = network {
+                q.insert("network".to_string(), n.as_str().to_string());
+            }
+            with_query("nearx://v1/staking".to_string(), &q)
+        }
     }
 }
 
@@ -823,5 +870,47 @@ mod tests {
     #[test]
     fn empty_parse_defaults_to_home_for_ui() {
         assert_eq!(parse(""), Some(Route::V1(RouteV1::Home)));
+    }
+
+    #[test]
+    fn parses_staking_route() {
+        let parsed = parse_deep_link("nearx://v1/staking").unwrap();
+        assert_eq!(
+            parsed.route,
+            Route::V1(RouteV1::Staking {
+                account_id: None,
+                network: None,
+            })
+        );
+        assert_eq!(parsed.canonical_uri, "nearx://v1/staking");
+    }
+
+    #[test]
+    fn parses_staking_with_account() {
+        let parsed =
+            parse_deep_link("nearx://v1/staking?account=alice.near").unwrap();
+        assert_eq!(
+            parsed.route,
+            Route::V1(RouteV1::Staking {
+                account_id: Some("alice.near".to_string()),
+                network: None,
+            })
+        );
+        assert_eq!(
+            parsed.canonical_uri,
+            "nearx://v1/staking?account=alice.near"
+        );
+    }
+
+    #[test]
+    fn parses_staking_alias() {
+        let parsed = parse_deep_link("nearx://staking?account=bob.near").unwrap();
+        assert_eq!(
+            parsed.route,
+            Route::V1(RouteV1::Staking {
+                account_id: Some("bob.near".to_string()),
+                network: None,
+            })
+        );
     }
 }

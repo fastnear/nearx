@@ -1,0 +1,18 @@
+{
+  "repo": "fastnear/explorer-frontend",
+  "branch": "main",
+  "synced_sha": "4a7532c1e59ebc1c67dc6352119901f8ff819e07",
+  "synced_date": "2026-02-25",
+  "local_prefix": "web",
+  "nearx_only": [
+    "src/tauri/",
+    "src/pages/SignTransaction.tsx",
+    "src/pages/Staking.tsx",
+    "src/components/AccountPicker.tsx",
+    "src/components/Sidebar.tsx",
+    "src/hooks/useAccountPrefs.ts",
+    "src/api/staking.ts",
+    "src/utils/networkRouting.ts"
+  ],
+  "notes": "web/ is a superset of explorer-frontend. Shared files should stay in sync. NEARx-only files listed above are excluded from upstream comparison."
+}
