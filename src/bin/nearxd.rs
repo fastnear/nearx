@@ -37,7 +37,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 const BROKER_VERSION: u8 = 1;
 const DEFAULT_INTENT_TTL_MS: u64 = 2 * 60 * 1000; // 2 minutes
 const MAX_INTENT_TTL_MS: u64 = 10 * 60 * 1000; // 10 minutes
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "nearxd.fastnear.auth";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "fastnear_auth_token";
 const KEYCHAIN_NEAR_CREDENTIAL_SERVICE: &str = "nearxd.near.credentials";
 const KEYCHAIN_SIGNING_SETTINGS_SERVICE: &str = "nearxd.signing.settings";
@@ -111,9 +113,11 @@ impl TokenStore for FileTokenStore {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct MacKeychainTokenStore;
 
+#[cfg(target_os = "macos")]
 impl TokenStore for MacKeychainTokenStore {
     fn backend_name(&self) -> &'static str {
         "keychain"
@@ -132,12 +136,14 @@ impl TokenStore for MacKeychainTokenStore {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct AutoTokenStore {
     primary: Arc<dyn TokenStore>,
     fallback: Arc<dyn TokenStore>,
 }
 
+#[cfg(target_os = "macos")]
 impl TokenStore for AutoTokenStore {
     fn backend_name(&self) -> &'static str {
         self.primary.backend_name()
@@ -512,6 +518,7 @@ fn keychain_write_generic(_service: &str, _account: &str, _value: &str) -> Resul
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn keychain_delete_generic(_service: &str, _account: &str) -> Result<(), String> {
     Err("keychain backend unavailable on this platform".to_string())
 }
@@ -536,14 +543,17 @@ fn keychain_has_generic_batch(_service: &str, accounts: &[&str]) -> Vec<bool> {
     vec![false; accounts.len()]
 }
 
+#[cfg(target_os = "macos")]
 fn read_keychain_token() -> Option<String> {
     keychain_read_generic(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
 }
 
+#[cfg(target_os = "macos")]
 fn persist_keychain_token(token: &str) -> Result<(), String> {
     keychain_write_generic(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, token)
 }
 
+#[cfg(target_os = "macos")]
 fn clear_keychain_token() -> Result<(), String> {
     keychain_delete_generic(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
 }
@@ -962,7 +972,7 @@ exit(3)
     run_swift_json(script, &[reason, if allow_fallback { "1" } else { "0" }])
 }
 
-fn probe_user_presence(allow_fallback: bool) -> Value {
+fn probe_user_presence(_allow_fallback: bool) -> Value {
     let adapter = user_presence_adapter();
     match adapter.as_str() {
         "mock" => json!({
@@ -981,7 +991,7 @@ fn probe_user_presence(allow_fallback: bool) -> Value {
         "swift" | "auto" => {
             #[cfg(target_os = "macos")]
             {
-                match swift_probe_user_presence(allow_fallback) {
+                match swift_probe_user_presence(_allow_fallback) {
                     Ok(mut v) => {
                         if let Some(obj) = v.as_object_mut() {
                             obj.insert("adapter".to_string(), json!("swift"));
@@ -1018,7 +1028,7 @@ fn probe_user_presence(allow_fallback: bool) -> Value {
     }
 }
 
-fn request_user_presence(reason: &str, allow_fallback: bool) -> Result<Value, String> {
+fn request_user_presence(_reason: &str, _allow_fallback: bool) -> Result<Value, String> {
     let adapter = user_presence_adapter();
     match adapter.as_str() {
         "mock" => Ok(json!({
@@ -1033,7 +1043,7 @@ fn request_user_presence(reason: &str, allow_fallback: bool) -> Result<Value, St
         "swift" | "auto" => {
             #[cfg(target_os = "macos")]
             {
-                let mut v = swift_request_user_presence(reason, allow_fallback)?;
+                let mut v = swift_request_user_presence(_reason, _allow_fallback)?;
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("adapter".to_string(), json!("swift"));
                 }
