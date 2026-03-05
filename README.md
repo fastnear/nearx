@@ -2,7 +2,7 @@
 
 NEARx is a NEAR explorer with a shared Rust core (`nearx`), a local broker daemon (`nearxd`), and a React/Vite frontend used by both the web target and Tauri desktop app.
 
-Status date: 2026-02-27
+Status date: 2026-03-05
 
 ## Active Targets
 
@@ -240,6 +240,7 @@ cargo tauri dev
 
 ## Canonical Docs
 
+- `CLAUDE.md` -- engineering continuity reference (architecture, contracts, sync workflow)
 - `QUICK_START.md`
 - `BUILD_VERIFICATION.md`
 - `docs/DEEP_LINK_URI_SPEC.md`

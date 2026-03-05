@@ -16,6 +16,13 @@ Primary, actively maintained docs:
 - `EXTENSION_SETUP.md`
 - `e2e-tests/README.md`
 
+Supplementary chapters (detailed reference):
+
+- `md-claude-chapters/01-architecture.md` - codebase structure, Rust core, React frontend, upstream sync
+- `md-claude-chapters/02-tauri-and-extension.md` - desktop shell, sidecar, deep links, extension, E2E
+- `md-claude-chapters/03-configuration-and-ops.md` - env vars, CLI args, tokens, build commands
+- `md-claude-chapters/04-user-guide.md` - keyboard shortcuts, filtering, mouse, fullscreen, accessibility
+
 If behavior changes, update these files in the same change set.
 
 ## 2. Repository Map
@@ -24,13 +31,12 @@ Key directories:
 
 - `src/` - shared core crate (`nearx`)
 - `src/bin/nearx.rs` - native TUI entrypoint
-- `src/bin/nearx-web-dom.rs` - WASM/DOM entrypoint
 - `src/bin/nearxd.rs` - local broker daemon
 - `native-host/` - browser native messaging host (stdio length-prefixed JSON)
 - `extension/` - browser extension (MV3)
 - `tauri-workspace/src-tauri/` - desktop shell and IPC commands
-- `web/` - DOM frontend + worker runtime
-- `e2e-tests/` - Selenium + tauri-driver E2E suite
+- `web/` - React/TypeScript frontend (synced from `fastnear/explorer-frontend`)
+- `e2e-tests/` - Playwright + Selenium E2E suite
 
 ## 3. Build Targets And Shared Core
 
@@ -42,12 +48,13 @@ NEARx is quad-target with one Rust core.
 - Entry: `src/bin/nearx.rs`
 - Features: `native`
 
-### 3.2 Web/WASM DOM
+### 3.2 Web Frontend
 
-- Binary: `nearx-web-dom`
-- Entry: `src/bin/nearx-web-dom.rs`
-- Features: `dom-web`
-- Runtime pattern: worker-hosted WASM, messagepack snapshots/actions
+- Entry: `web/src/main.tsx` (React 18 / TypeScript / Tailwind v4 / Vite)
+- Build: `yarn workspace explorer-frontend build` (output: `web/dist/`)
+- Dev: `yarn workspace explorer-frontend dev`
+- Synced from `fastnear/explorer-frontend` with NEARx additions (see section 10)
+- Tauri integration: `web/src/tauri/runtime.ts`, `web/src/tauri/deeplink.ts`
 
 ### 3.3 Tauri Desktop
 
@@ -63,21 +70,13 @@ NEARx is quad-target with one Rust core.
 - Native host: `native-host/src/main.rs`
 - Host manifest template: `native-host/com.nearx.native.json`
 
-### 3.5 Terminal Look Parity Contract (TUI <-> Web/Tauri)
+### 3.5 Visual Design Notes
 
-Visual parity is intentional and should be treated as a contract:
+The native TUI (`nearx`) uses `src/theme.rs::Theme` for its palette and rendering semantics.
 
-- source-of-truth palette and semantics: `src/theme.rs::Theme`
-- web/tauri consume theme via CSS variables exported by `Theme::to_css_vars()`
-- injection happens in `src/bin/nearx-web-dom.rs` startup (`apply_theme_to_dom`)
-- shared interaction model comes from `UiSnapshot` / `UiAction` (`src/ui_snapshot.rs`)
+The web/Tauri frontend uses its own CSS (Tailwind v4) and is not driven by `Theme::to_css_vars()`. Visual parity between TUI and web is no longer a strict contract -- the web frontend follows upstream `explorer-frontend` design conventions.
 
-Required invariants:
-
-- pane focus uses yellow accent top border (`--accent-strong`)
-- square-corner pane geometry and minimal spacing (terminal/DOS aesthetic)
-- selected rows include chevron prefix (`›`)
-- details pane uses monospaced rendering and windowed payload behavior
+`Theme::to_css_vars()` still exists in `src/theme.rs` but is unused by the current web frontend (it was used by the archived WASM/DOM build).
 
 ## 4. Deep-Link Contract
 
@@ -299,33 +298,23 @@ All commands forward to `nearxd` via unix socket:
 - `get_runtime_config` asks broker with `include_token=true`
 - Falls back to env defaults if broker unavailable
 
-## 9. Web + Worker Contract
+## 9. Web Frontend Contract
+
+The web frontend is a React/TypeScript/Vite app in `web/`.
 
 Files:
 
-- `web/app.js`
-- `web/worker.js`
-- `src/bin/nearx-web-dom.rs`
+- `web/src/main.tsx` - React app entry
+- `web/src/tauri/runtime.ts` - Tauri command invocations (`get_runtime_config`, `sign_transaction`, etc.)
+- `web/src/tauri/deeplink.ts` - deep-link event listener from Tauri shell
+- `web/CLAUDE.md` - detailed frontend architecture reference
 
-Behavior:
+Modes:
 
-- main thread loads runtime config via Tauri command
-- sends `runtimeConfig` in worker `init`
-- worker sets `self.__NEARX_RUNTIME_CONFIG`
-- WASM app reads runtime overrides at startup
-- deep-link events (`nearx://open`) are forwarded to worker as `deepLink`
-- worker calls `WasmApp.applyDeepLink` and returns updated snapshot
+- **Tauri mode** (`VITE_TAURI=true`): imports `@tauri-apps/api`, invokes commands via `web/src/tauri/runtime.ts`, receives deep-link events
+- **Standalone mode**: same app served by Vite, configurable `VITE_API_BASE_URL` for API endpoint
 
-Message protocol:
-
-- main -> worker: `init`, `snapshot`, `action`, `deepLink`, `setDetailsViewport`, `getClipboard`
-- worker -> main: `ready`, `snapshot`, `clipboard`, `error`
-
-Performance invariants:
-
-- WASM execution stays off main thread (worker-hosted)
-- snapshots/actions use MessagePack + transferables for low overhead
-- polling/render loop is intentionally throttled (10 Hz) to avoid unnecessary UI churn
+The frontend communicates with `nearxd` only when running inside Tauri (via Tauri commands that forward to the broker). In standalone mode, it talks directly to NEAR RPC endpoints.
 
 ## 10. Explorer Frontend Upstream Parity
 
