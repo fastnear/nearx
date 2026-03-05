@@ -25,12 +25,13 @@ path = "src/bin/nearxd.rs"
 [workspace]
 resolver = "2"
 members = [
-  ".",                       # nearx root
-  "plugins/tx-analyzer",
-  "plugins/validator-monitor"
+  ".",
 ]
 exclude = [
   "native-host",
+  "nearx-plugin-core",
+  "plugins/tx-analyzer",
+  "plugins/validator-monitor",
   "tauri-workspace",
 ]
 

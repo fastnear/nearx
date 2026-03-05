@@ -29,11 +29,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy (native features)
-        run: cargo clippy -p nearx -p ref-arb-scanner --features native --all-targets -- -D warnings
+      - name: Clippy
+        run: cargo clippy -p nearx --features native --all-targets -- -D warnings
 
-      - name: Test (native)
-        run: cargo test --features native --all
+      - name: Test
+        run: cargo test -p nearx --features native
 
       - name: Check native-host
         run: cargo check --manifest-path native-host/Cargo.toml

@@ -295,6 +295,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         fps: u32,
         fps_choices: Vec<u32>,

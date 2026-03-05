@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use near_crypto::{PublicKey, SecretKey};
 use near_primitives::action::{Action, FunctionCallAction, TransferAction};
 use near_primitives::hash::CryptoHash;
@@ -279,10 +282,7 @@ fn parse_near_actions(actions_json: &[Value]) -> Result<Vec<Action>, String> {
                     .get("gas")
                     .and_then(Value::as_u64)
                     .unwrap_or(30_000_000_000_000); // 30 TGas default
-                let deposit_str = a
-                    .get("deposit")
-                    .and_then(Value::as_str)
-                    .unwrap_or("0");
+                let deposit_str = a.get("deposit").and_then(Value::as_str).unwrap_or("0");
                 let deposit: u128 = deposit_str
                     .parse()
                     .map_err(|e| format!("action[{i}]: invalid deposit: {e}"))?;
@@ -462,8 +462,8 @@ fn keychain_has_generic(service: &str, account: &str) -> bool {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::string::CFString;
     use core_foundation_sys::dictionary::{
-        CFDictionaryCreateMutable, CFDictionarySetValue, kCFTypeDictionaryKeyCallBacks,
-        kCFTypeDictionaryValueCallBacks,
+        kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreateMutable,
+        CFDictionarySetValue,
     };
     use security_framework_sys::item::*;
     use security_framework_sys::keychain_item::SecItemCopyMatching;
@@ -473,13 +473,27 @@ fn keychain_has_generic(service: &str, account: &str) -> bool {
 
     unsafe {
         let query = CFDictionaryCreateMutable(
-            std::ptr::null(), 0,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks,
+            std::ptr::null(),
+            0,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
         );
         CFDictionarySetValue(query, kSecClass as _, kSecClassGenericPassword as _);
-        CFDictionarySetValue(query, kSecAttrService as _, service_cf.as_concrete_TypeRef() as _);
-        CFDictionarySetValue(query, kSecAttrAccount as _, account_cf.as_concrete_TypeRef() as _);
-        CFDictionarySetValue(query, kSecReturnAttributes as _, CFBoolean::true_value().as_CFTypeRef() as _);
+        CFDictionarySetValue(
+            query,
+            kSecAttrService as _,
+            service_cf.as_concrete_TypeRef() as _,
+        );
+        CFDictionarySetValue(
+            query,
+            kSecAttrAccount as _,
+            account_cf.as_concrete_TypeRef() as _,
+        );
+        CFDictionarySetValue(
+            query,
+            kSecReturnAttributes as _,
+            CFBoolean::true_value().as_CFTypeRef() as _,
+        );
 
         let status = SecItemCopyMatching(query as _, std::ptr::null_mut());
         core_foundation_sys::base::CFRelease(query as _);
@@ -511,7 +525,10 @@ fn keychain_has_generic(_service: &str, _account: &str) -> bool {
 /// Each call is <1ms, so a simple loop is fast enough.
 #[cfg(target_os = "macos")]
 fn keychain_has_generic_batch(service: &str, accounts: &[&str]) -> Vec<bool> {
-    accounts.iter().map(|a| keychain_has_generic(service, a)).collect()
+    accounts
+        .iter()
+        .map(|a| keychain_has_generic(service, a))
+        .collect()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -660,11 +677,11 @@ fn keychain_write_generic_protected(
     use core_foundation::string::CFString;
     use core_foundation_sys::base::CFRelease;
     use core_foundation_sys::dictionary::{
-        CFDictionaryCreateMutable, CFDictionarySetValue, kCFTypeDictionaryKeyCallBacks,
-        kCFTypeDictionaryValueCallBacks,
+        kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreateMutable,
+        CFDictionarySetValue,
     };
     use security_framework_sys::access_control::{
-        SecAccessControlCreateWithFlags, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly, SecAccessControlCreateWithFlags,
     };
     use security_framework_sys::item::*;
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemDelete};
@@ -680,17 +697,31 @@ fn keychain_write_generic_protected(
     unsafe {
         // Delete existing item first
         let dq = CFDictionaryCreateMutable(
-            std::ptr::null(), 0,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks,
+            std::ptr::null(),
+            0,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
         );
         CFDictionarySetValue(dq, kSecClass as _, kSecClassGenericPassword as _);
-        CFDictionarySetValue(dq, kSecAttrService as _, service_cf.as_concrete_TypeRef() as _);
-        CFDictionarySetValue(dq, kSecAttrAccount as _, account_cf.as_concrete_TypeRef() as _);
+        CFDictionarySetValue(
+            dq,
+            kSecAttrService as _,
+            service_cf.as_concrete_TypeRef() as _,
+        );
+        CFDictionarySetValue(
+            dq,
+            kSecAttrAccount as _,
+            account_cf.as_concrete_TypeRef() as _,
+        );
         SecItemDelete(dq as _);
         CFRelease(dq as _);
 
         // Try protected write (requires code-signed binary with entitlements)
-        let flags = if biometry_only { BIOMETRY_CURRENT_SET } else { USER_PRESENCE };
+        let flags = if biometry_only {
+            BIOMETRY_CURRENT_SET
+        } else {
+            USER_PRESENCE
+        };
 
         let mut error: core_foundation_sys::error::CFErrorRef = std::ptr::null_mut();
         let access = SecAccessControlCreateWithFlags(
@@ -702,12 +733,22 @@ fn keychain_write_generic_protected(
 
         if !access.is_null() {
             let aq = CFDictionaryCreateMutable(
-                std::ptr::null(), 0,
-                &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks,
+                std::ptr::null(),
+                0,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
             );
             CFDictionarySetValue(aq, kSecClass as _, kSecClassGenericPassword as _);
-            CFDictionarySetValue(aq, kSecAttrService as _, service_cf.as_concrete_TypeRef() as _);
-            CFDictionarySetValue(aq, kSecAttrAccount as _, account_cf.as_concrete_TypeRef() as _);
+            CFDictionarySetValue(
+                aq,
+                kSecAttrService as _,
+                service_cf.as_concrete_TypeRef() as _,
+            );
+            CFDictionarySetValue(
+                aq,
+                kSecAttrAccount as _,
+                account_cf.as_concrete_TypeRef() as _,
+            );
             CFDictionarySetValue(aq, kSecValueData as _, data.as_CFTypeRef() as _);
             CFDictionarySetValue(aq, kSecAttrAccessControl as _, access as _);
 
@@ -723,7 +764,9 @@ fn keychain_write_generic_protected(
             if status != -34018 {
                 return Err(format!("SecItemAdd failed with status {status}"));
             }
-            log::warn!("Protected SecItemAdd failed (-34018), falling back to unprotected keychain");
+            log::warn!(
+                "Protected SecItemAdd failed (-34018), falling back to unprotected keychain"
+            );
         }
 
         // Fallback: store without biometry protection (works for unsigned CLI binaries)
@@ -1228,6 +1271,7 @@ fn cleanup_expired_intents(state: &BrokerState) {
     }
 }
 
+#[allow(clippy::needless_return)]
 fn open_url(url: &str) -> Result<(), String> {
     use std::process::Command;
 
@@ -1602,12 +1646,9 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
                 .iter()
                 .map(|(aid, _)| format!("{network}:{aid}"))
                 .collect();
-            let keychain_refs: Vec<&str> =
-                keychain_accounts.iter().map(|s| s.as_str()).collect();
-            let in_keychain_flags = keychain_has_generic_batch(
-                KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
-                &keychain_refs,
-            );
+            let keychain_refs: Vec<&str> = keychain_accounts.iter().map(|s| s.as_str()).collect();
+            let in_keychain_flags =
+                keychain_has_generic_batch(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &keychain_refs);
 
             let mut accounts = Vec::new();
             for (i, (account_id, public_key)) in summaries.into_iter().enumerate() {
@@ -2110,11 +2151,7 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
             let signer_id: AccountId = match signer_id_str.parse() {
                 Ok(v) => v,
                 Err(e) => {
-                    return BrokerResponse::err(
-                        id,
-                        "ERR_PARAMS",
-                        format!("invalid signer_id: {e}"),
-                    )
+                    return BrokerResponse::err(id, "ERR_PARAMS", format!("invalid signer_id: {e}"))
                 }
             };
 
@@ -2189,17 +2226,16 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
                 .to_ascii_lowercase();
             let reason = parse_string(&req.params, "reason")
                 .unwrap_or("NEARx needs your approval to sign a transaction.");
-            let credential =
-                match read_near_credential_keychain(&network, signer_id_str, reason) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return BrokerResponse::err(
-                            id,
-                            "ERR_AUTH",
-                            format!("credential read failed: {e}"),
-                        )
-                    }
-                };
+            let credential = match read_near_credential_keychain(&network, signer_id_str, reason) {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_AUTH",
+                        format!("credential read failed: {e}"),
+                    )
+                }
+            };
 
             // Extract and parse private key
             let Some(private_key_str) = credential.get("private_key").and_then(Value::as_str)

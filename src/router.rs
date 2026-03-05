@@ -887,8 +887,7 @@ mod tests {
 
     #[test]
     fn parses_staking_with_account() {
-        let parsed =
-            parse_deep_link("nearx://v1/staking?account=alice.near").unwrap();
+        let parsed = parse_deep_link("nearx://v1/staking?account=alice.near").unwrap();
         assert_eq!(
             parsed.route,
             Route::V1(RouteV1::Staking {

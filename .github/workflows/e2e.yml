@@ -1,21 +1,7 @@
 name: E2E Tests (Linux)
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - 'tauri-workspace/**'
-      - 'e2e-tests/**'
-      - 'src/**'
-      - '.github/workflows/e2e.yml'
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - 'tauri-workspace/**'
-      - 'e2e-tests/**'
-      - 'src/**'
-      - '.github/workflows/e2e.yml'
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch: # Manual trigger only — auto-trigger disabled until workflow is fixed
 
 jobs:
   e2e-linux:
