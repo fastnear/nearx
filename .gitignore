@@ -71,4 +71,7 @@ assets/fonts/
 # Archived documentation
 docs/archive/
 
+# Tauri sidecar binaries (built by tools/build-sidecar.sh)
+tauri-workspace/src-tauri/binaries/nearxd-*
+
 .claude

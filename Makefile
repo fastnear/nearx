@@ -5,7 +5,7 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-.PHONY: help web web-release dev nearxd nearxd-release clean install-deps repair-js-deps e2e
+.PHONY: help web web-release dev nearxd nearxd-release sidecar tauri-build clean install-deps repair-js-deps e2e
 
 help:
 	@echo "NEARx Build Commands:"
@@ -14,6 +14,8 @@ help:
 	@echo "  make dev            - Start explorer frontend dev server"
 	@echo "  make nearxd         - Run nearxd broker daemon"
 	@echo "  make nearxd-release - Build nearxd release binary"
+	@echo "  make sidecar        - Build nearxd sidecar for Tauri bundle"
+	@echo "  make tauri-build    - Build Tauri desktop app (includes web + sidecar)"
 	@echo "  make e2e            - Run Selenium E2E suite"
 	@echo "  make clean          - Clean build artifacts"
 	@echo "  make install-deps   - Install JS dependencies via Yarn Berry"
@@ -36,6 +38,12 @@ nearxd:
 nearxd-release:
 	@echo "Building nearxd (release)..."
 	@cargo build --release --bin nearxd
+
+sidecar:
+	@tools/build-sidecar.sh
+
+tauri-build: web sidecar
+	@cd tauri-workspace/src-tauri && cargo tauri build
 
 e2e:
 	@echo "Running Selenium E2E suite..."

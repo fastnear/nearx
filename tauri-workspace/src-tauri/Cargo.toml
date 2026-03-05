@@ -27,6 +27,7 @@ tauri-plugin-single-instance = { workspace = true }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-shell = { workspace = true }
 
 # Utilities
 chrono = "0.4"

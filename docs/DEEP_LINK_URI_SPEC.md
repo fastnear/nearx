@@ -35,6 +35,7 @@ Canonical routes:
 - `nearx://v1/account/<accountId>`
 - `nearx://v1/contract/<accountId>`
 - `nearx://v1/access-key/<accountId>/<publicKey>`
+- `nearx://v1/staking`
 
 ## 3. Route Definitions
 
@@ -108,6 +109,16 @@ Behavior:
 
 `<publicKey>` is the NEAR key string, e.g. `ed25519:...` or `secp256k1:...`.
 
+### 3.7 `staking`
+
+`nearx://v1/staking[?account=<accountId>][&network=<network>]`
+
+Behavior:
+
+- navigate to staking dashboard
+- if `account` is provided, pre-select that account in the account selector
+- Tauri/desktop only; ignored in TUI
+
 ## 4. Query Parameters
 
 Allowed query keys are route-specific and strict.
@@ -120,6 +131,7 @@ Route-specific:
 
 - `tx`: `block`
 - `contract`: `method`
+- `staking`: `account`
 
 Unknown query keys MUST cause validation failure.
 
@@ -189,6 +201,7 @@ These MAY be accepted but MUST normalize to canonical `nearx://v1/...`.
 - `nearx://account/<accountId>` -> `nearx://v1/account/<accountId>`
 - `nearx://contract/<accountId>` -> `nearx://v1/contract/<accountId>`
 - `nearx://access-key/<accountId>/<publicKey>` -> `nearx://v1/access-key/<accountId>/<publicKey>`
+- `nearx://staking` -> `nearx://v1/staking`
 
 Legacy:
 
@@ -257,6 +270,8 @@ Valid canonical:
 - `nearx://v1/account/intents.near`
 - `nearx://v1/contract/app.near?method=ft_transfer`
 - `nearx://v1/access-key/app.near/ed25519:4NfTivU6N3Wy6u9k8i8w8s8qF2g8Xx1R5zqjYQz6YJ8a`
+- `nearx://v1/staking`
+- `nearx://v1/staking?account=alice.near`
 
 Valid non-canonical input (must normalize):
 

@@ -31,6 +31,9 @@ if [[ ! -d "web/dist" ]]; then
   exit 2
 fi
 
+echo "==> Build nearxd sidecar"
+tools/build-sidecar.sh
+
 echo "==> Tauri desktop build"
 pushd tauri-workspace/src-tauri >/dev/null
 cargo tauri build

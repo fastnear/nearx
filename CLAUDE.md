@@ -1,6 +1,6 @@
 # NEARx Engineering Continuity
 
-Status date: 2026-02-26
+Status date: 2026-03-05
 
 This file is a technical continuity reference for maintainers and collaborators. It captures current architecture, runtime contracts, and integration boundaries across all targets.
 
@@ -16,6 +16,13 @@ Primary, actively maintained docs:
 - `EXTENSION_SETUP.md`
 - `e2e-tests/README.md`
 
+Supplementary chapters (detailed reference):
+
+- `md-claude-chapters/01-architecture.md` - codebase structure, Rust core, React frontend, upstream sync
+- `md-claude-chapters/02-tauri-and-extension.md` - desktop shell, sidecar, deep links, extension, E2E
+- `md-claude-chapters/03-configuration-and-ops.md` - env vars, CLI args, tokens, build commands
+- `md-claude-chapters/04-user-guide.md` - keyboard shortcuts, filtering, mouse, fullscreen, accessibility
+
 If behavior changes, update these files in the same change set.
 
 ## 2. Repository Map
@@ -24,13 +31,12 @@ Key directories:
 
 - `src/` - shared core crate (`nearx`)
 - `src/bin/nearx.rs` - native TUI entrypoint
-- `src/bin/nearx-web-dom.rs` - WASM/DOM entrypoint
 - `src/bin/nearxd.rs` - local broker daemon
 - `native-host/` - browser native messaging host (stdio length-prefixed JSON)
 - `extension/` - browser extension (MV3)
 - `tauri-workspace/src-tauri/` - desktop shell and IPC commands
-- `web/` - DOM frontend + worker runtime
-- `e2e-tests/` - Selenium + tauri-driver E2E suite
+- `web/` - React/TypeScript frontend (synced from `fastnear/explorer-frontend`)
+- `e2e-tests/` - Playwright + Selenium E2E suite
 
 ## 3. Build Targets And Shared Core
 
@@ -42,18 +48,21 @@ NEARx is quad-target with one Rust core.
 - Entry: `src/bin/nearx.rs`
 - Features: `native`
 
-### 3.2 Web/WASM DOM
+### 3.2 Web Frontend
 
-- Binary: `nearx-web-dom`
-- Entry: `src/bin/nearx-web-dom.rs`
-- Features: `dom-web`
-- Runtime pattern: worker-hosted WASM, messagepack snapshots/actions
+- Entry: `web/src/main.tsx` (React 18 / TypeScript / Tailwind v4 / Vite)
+- Build: `yarn workspace explorer-frontend build` (output: `web/dist/`)
+- Dev: `yarn workspace explorer-frontend dev`
+- Synced from `fastnear/explorer-frontend` with NEARx additions (see section 10)
+- Tauri integration: `web/src/tauri/runtime.ts`, `web/src/tauri/deeplink.ts`
 
 ### 3.3 Tauri Desktop
 
 - Shell: `tauri-workspace/src-tauri/src/main.rs`
 - Webview frontend: `web/`
 - Deep link scheme registration: `nearx`
+- Sidecar: auto-spawns `nearxd` if no standalone instance is running (see section 8)
+- Sidecar build: `bash tools/build-sidecar.sh` (copies binary to `tauri-workspace/src-tauri/binaries/`)
 
 ### 3.4 Extension + Native Host
 
@@ -61,21 +70,13 @@ NEARx is quad-target with one Rust core.
 - Native host: `native-host/src/main.rs`
 - Host manifest template: `native-host/com.nearx.native.json`
 
-### 3.5 Terminal Look Parity Contract (TUI <-> Web/Tauri)
+### 3.5 Visual Design Notes
 
-Visual parity is intentional and should be treated as a contract:
+The native TUI (`nearx`) uses `src/theme.rs::Theme` for its palette and rendering semantics.
 
-- source-of-truth palette and semantics: `src/theme.rs::Theme`
-- web/tauri consume theme via CSS variables exported by `Theme::to_css_vars()`
-- injection happens in `src/bin/nearx-web-dom.rs` startup (`apply_theme_to_dom`)
-- shared interaction model comes from `UiSnapshot` / `UiAction` (`src/ui_snapshot.rs`)
+The web/Tauri frontend uses its own CSS (Tailwind v4) and is not driven by `Theme::to_css_vars()`. Visual parity between TUI and web is no longer a strict contract -- the web frontend follows upstream `explorer-frontend` design conventions.
 
-Required invariants:
-
-- pane focus uses yellow accent top border (`--accent-strong`)
-- square-corner pane geometry and minimal spacing (terminal/DOS aesthetic)
-- selected rows include chevron prefix (`›`)
-- details pane uses monospaced rendering and windowed payload behavior
+`Theme::to_css_vars()` still exists in `src/theme.rs` but is unused by the current web frontend (it was used by the archived WASM/DOM build).
 
 ## 4. Deep-Link Contract
 
@@ -95,6 +96,7 @@ Canonical routes:
 - `account`
 - `contract`
 - `access-key`
+- `staking`
 
 Compatibility aliases and legacy `near://` are accepted only on input boundaries and normalized.
 
@@ -118,6 +120,7 @@ Current mapping:
 - `contract` route: transactions pane, `receiver:<account> action:FunctionCall,DeployContract` plus optional `method:`
 - `access-key` route: transactions pane, `acct:<account> action:AddKey,DeleteKey raw:<publicKey>`
 - `home` route: clear filter + return to auto-follow
+- `staking` route: staking dashboard (Tauri/web only, ignored in TUI), optional `?account=<accountId>`
 
 ## 6. nearxd Broker
 
@@ -259,53 +262,92 @@ Legacy exception (explicit):
 
 File: `tauri-workspace/src-tauri/src/main.rs`
 
-Commands:
+### 8.1 nearxd Sidecar
+
+On startup, the Tauri app checks the default nearxd socket path:
+
+- If a standalone `nearxd` is already listening, it reuses that instance
+- Otherwise, it spawns `nearxd` as a managed sidecar via `tauri-plugin-shell`
+  - Sidecar socket: `$TMPDIR/nearxd-tauri-<pid>.sock`
+  - `NEARXD_SOCKET_PATH` env is pointed at the sidecar socket
+  - Sidecar is killed on app exit (`SidecarChild` drop)
+- Sidecar binary must be pre-built: `bash tools/build-sidecar.sh`
+- If the sidecar binary is not bundled, broker-dependent features (credentials, signing, deep-link parsing) are unavailable
+
+### 8.2 Tauri Commands
+
+All commands forward to `nearxd` via unix socket:
 
 - `open_external`
 - `get_runtime_config`
+- `request_user_presence`
+- `list_near_credentials`
+- `import_near_credentials`
+- `sign_transaction`
 - E2E-only commands from `test_api.rs` (feature `e2e`)
 
-Deep-link pipeline:
+### 8.3 Deep-Link Pipeline
 
 - On deep-link/open-url/single-instance argv -> `canonicalize_deep_link`
 - Uses `nearxd.parse_deep_link` when broker is reachable
 - Fallback path accepts strict `nearx://v1/...` and `near://v1/...` remap only
 - Emits canonical URL on event `nearx://open`
 
-Runtime config pipeline:
+### 8.4 Runtime Config Pipeline
 
 - `get_runtime_config` asks broker with `include_token=true`
 - Falls back to env defaults if broker unavailable
 
-## 9. Web + Worker Contract
+## 9. Web Frontend Contract
+
+The web frontend is a React/TypeScript/Vite app in `web/`.
 
 Files:
 
-- `web/app.js`
-- `web/worker.js`
-- `src/bin/nearx-web-dom.rs`
+- `web/src/main.tsx` - React app entry
+- `web/src/tauri/runtime.ts` - Tauri command invocations (`get_runtime_config`, `sign_transaction`, etc.)
+- `web/src/tauri/deeplink.ts` - deep-link event listener from Tauri shell
+- `web/CLAUDE.md` - detailed frontend architecture reference
 
-Behavior:
+Modes:
 
-- main thread loads runtime config via Tauri command
-- sends `runtimeConfig` in worker `init`
-- worker sets `self.__NEARX_RUNTIME_CONFIG`
-- WASM app reads runtime overrides at startup
-- deep-link events (`nearx://open`) are forwarded to worker as `deepLink`
-- worker calls `WasmApp.applyDeepLink` and returns updated snapshot
+- **Tauri mode** (`VITE_TAURI=true`): imports `@tauri-apps/api`, invokes commands via `web/src/tauri/runtime.ts`, receives deep-link events
+- **Standalone mode**: same app served by Vite, configurable `VITE_API_BASE_URL` for API endpoint
 
-Message protocol:
+The frontend communicates with `nearxd` only when running inside Tauri (via Tauri commands that forward to the broker). In standalone mode, it talks directly to NEAR RPC endpoints.
 
-- main -> worker: `init`, `snapshot`, `action`, `deepLink`, `setDetailsViewport`, `getClipboard`
-- worker -> main: `ready`, `snapshot`, `clipboard`, `error`
+## 10. Explorer Frontend Upstream Parity
 
-Performance invariants:
+`web/` is a superset of [`fastnear/explorer-frontend`](https://github.com/fastnear/explorer-frontend). Shared files should stay in sync with upstream; NEARx-only files are excluded from comparison.
 
-- WASM execution stays off main thread (worker-hosted)
-- snapshots/actions use MessagePack + transferables for low overhead
-- polling/render loop is intentionally throttled (10 Hz) to avoid unnecessary UI churn
+Config: `web/.explorer-upstream.json`
+Sync tool: `tools/sync-explorer.sh`
 
-## 10. Extension Integration Model
+### 10.1 Boundary
+
+`nearx_only` in the config lists paths that exist only in NEARx (Tauri integration, signing, staking, sidebar, etc.). Everything else in `web/src/` and `web/public/` is expected to match upstream at the synced commit.
+
+### 10.2 Sync Commands
+
+```bash
+tools/sync-explorer.sh              # summary: identical / diverged / missing counts
+tools/sync-explorer.sh --latest     # compare against upstream HEAD (not last synced SHA)
+tools/sync-explorer.sh --diff       # show full diffs for diverged files
+tools/sync-explorer.sh --apply      # interactive per-file overwrite from upstream
+tools/sync-explorer.sh --bump       # update synced_sha to upstream HEAD after resolving
+```
+
+### 10.3 Sync Workflow
+
+1. `tools/sync-explorer.sh` — reports "Upstream has N new commits since last sync"
+2. `--latest --diff` — shows what changed upstream vs local
+3. For each diverged file: take upstream change, keep local, or merge manually
+4. `--apply` — interactively overwrite files where upstream is preferred
+5. `--bump` — record the new synced SHA after all divergences are resolved or intentional
+
+If adding new NEARx-only files under `web/`, add them to the `nearx_only` list in the config so they are excluded from upstream comparison.
+
+## 11. Extension Integration Model
 
 Files:
 
@@ -326,7 +368,7 @@ Manifest layering:
 - native host manifest (`native-host/com.nearx.native.json`)
 - tauri manifest (`tauri-workspace/src-tauri/tauri.conf.json`)
 
-## 11. E2E Test Surface
+## 12. E2E Test Surface
 
 Files:
 
@@ -344,7 +386,7 @@ Roundtrip assertion added:
 
 - legacy alias input canonicalizes to strict `nearx://v1/...` output
 
-## 12. Operational Commands
+## 13. Operational Commands
 
 Core checks:
 
@@ -359,6 +401,24 @@ cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml
 cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml --features e2e
 ```
 
+Web frontend typecheck:
+
+```bash
+cd web && npx tsc -b
+```
+
+Build nearxd sidecar (required for Tauri dev):
+
+```bash
+bash tools/build-sidecar.sh
+```
+
+Tauri dev (single command — starts Vite + spawns nearxd sidecar):
+
+```bash
+cd tauri-workspace && cargo tauri dev
+```
+
 E2E smoke:
 
 ```bash
@@ -366,7 +426,7 @@ cd e2e-tests
 npm test
 ```
 
-## 13. Continuity Rules
+## 14. Continuity Rules
 
 When changing deep links:
 
@@ -386,6 +446,13 @@ When changing extension/native-host plumbing:
 1. update `EXTENSION_SETUP.md`
 2. ensure manifest naming consistency (`com.nearx.native`)
 3. verify host protocol compatibility
+
+When syncing explorer upstream:
+
+1. run `tools/sync-explorer.sh --latest --diff` to assess divergence
+2. if taking upstream changes, verify NEARx integrations (Tauri hooks, dark mode, Sidebar) still work
+3. run `--bump` only after all divergences are resolved or intentional
+4. if adding new NEARx-only files under `web/`, add them to `nearx_only` in `web/.explorer-upstream.json`
 
 When discovering stale docs or duplicates:
 

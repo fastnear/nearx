@@ -2,7 +2,7 @@
 
 NEARx is a NEAR explorer with a shared Rust core (`nearx`), a local broker daemon (`nearxd`), and a React/Vite frontend used by both the web target and Tauri desktop app.
 
-Status date: 2026-02-27
+Status date: 2026-03-05
 
 ## Active Targets
 
@@ -12,6 +12,22 @@ Status date: 2026-02-27
 - Browser extension + native messaging host
 
 Legacy WASM/DOM web implementation was archived under `archive/legacy-web-dom/`.
+
+## Quick Start (Tauri Desktop)
+
+```bash
+# 1. Install JS dependencies (first time / after pulling)
+yarn install
+
+# 2. Build the nearxd sidecar (first time / after Rust changes to nearxd)
+bash tools/build-sidecar.sh
+
+# 3. Run the desktop app
+cd tauri-workspace
+cargo tauri dev
+```
+
+That's it. `cargo tauri dev` starts the Vite dev server automatically (`beforeDevCommand`) and spawns `nearxd` as a managed sidecar process — no separate terminals needed. The sidecar handles credentials, signing, deep-link parsing, and token resolution. If a standalone `nearxd` is already running on the default socket, the sidecar spawn is skipped and the existing instance is reused.
 
 ## Repository Layout
 
@@ -24,6 +40,10 @@ nearx/
 ├── extension/               # Browser extensions
 └── archive/legacy-web-dom/  # Archived former WASM web target
 ```
+
+### Explorer Frontend Upstream
+
+`web/` is a superset of [`fastnear/explorer-frontend`](https://github.com/fastnear/explorer-frontend). Shared files stay in sync; NEARx-only additions (Tauri integration, signing, staking) are tracked in `web/.explorer-upstream.json`. Run `tools/sync-explorer.sh` to check for upstream divergence — see `CLAUDE.md` section 10 for the full sync workflow.
 
 ## Deep Link Contract
 
@@ -38,6 +58,7 @@ Tauri flow:
    - `tx/<hash>` -> `/tx/:txHash`
    - `block/<id>` -> `/block/:blockId`
    - `account/<id>` -> `/account/:accountId`
+   - `staking` -> `/staking` (Tauri only)
 4. Unsupported deep links fall back to home.
 
 ## Package Management
@@ -74,16 +95,21 @@ make web
 ### Tauri desktop
 
 ```bash
-cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+# Build sidecar (once, or after nearxd Rust changes)
+bash tools/build-sidecar.sh
+
+# Run desktop app (starts Vite + spawns nearxd sidecar automatically)
+cd tauri-workspace
 cargo tauri dev
 ```
 
-`cargo tauri dev` automatically starts the explorer frontend dev server via Tauri's `beforeDevCommand`, so you do not need a separate `make dev` terminal for desktop development.
+`cargo tauri dev` automatically starts the explorer frontend dev server via Tauri's `beforeDevCommand` and spawns `nearxd` as a sidecar, so you do not need separate terminals for the dev server or the broker daemon.
 
-### nearxd broker
+### nearxd broker (standalone)
+
+Only needed if you want to run nearxd independently of Tauri (e.g. for the native TUI or debugging):
 
 ```bash
-cd /Users/mikepurvis/near/fn/nearx
 make nearxd
 ```
 
@@ -96,14 +122,13 @@ On macOS, `nearx://...` deep links do not use dev-time runtime registration. The
 ### Deterministic local desktop flow
 
 ```bash
-# terminal 1
-cd /Users/mikepurvis/near/fn/nearx
-make nearxd
-
-# terminal 2
-cd /Users/mikepurvis/near/fn/nearx/tauri-workspace
+# Build sidecar once, then run Tauri (single terminal)
+bash tools/build-sidecar.sh
+cd tauri-workspace
 cargo tauri dev
 ```
+
+The Tauri app auto-spawns `nearxd` as a sidecar on startup. If a standalone `nearxd` is already running on the default socket, the app reuses it instead.
 
 ### macOS deep-link ready flow (main path)
 
@@ -144,10 +169,10 @@ start nearx://v1/home
 
 ```bash
 mdfind "kMDItemCFBundleIdentifier == 'com.fastnear.nearx'"
-strings /Applications/NEARx.app/Contents/MacOS/nearx-tauri | rg 'NEAR Rocks Explorer'
+strings /Applications/NEARx.app/Contents/MacOS/nearx-tauri | rg 'NEARx'
 ```
 
-Expected visual sanity check: window title includes `NEARx — NEAR Rocks Explorer`.
+Expected visual sanity check: window title shows `NEARx`.
 
 ## E2E
 
@@ -215,6 +240,7 @@ cargo tauri dev
 
 ## Canonical Docs
 
+- `CLAUDE.md` -- engineering continuity reference (architecture, contracts, sync workflow)
 - `QUICK_START.md`
 - `BUILD_VERIFICATION.md`
 - `docs/DEEP_LINK_URI_SPEC.md`

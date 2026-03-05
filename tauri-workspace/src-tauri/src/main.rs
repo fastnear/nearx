@@ -6,6 +6,7 @@ use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
+use tauri_plugin_shell::ShellExt;
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -17,6 +18,17 @@ mod test_api;
 
 #[derive(Default, Clone)]
 struct PendingLinks(Arc<Mutex<Vec<String>>>);
+
+struct SidecarChild(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
+
+impl Drop for SidecarChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.lock().unwrap().take() {
+            let _ = child.kill();
+            log::info!("nearxd sidecar terminated");
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct RuntimeConfig {
@@ -261,7 +273,8 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_clipboard_manager::init());
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_shell::init());
 
     #[cfg(feature = "e2e")]
     {
@@ -316,6 +329,60 @@ fn main() {
                         if let Some(canonical) = canonicalize_deep_link(&url.to_string()) {
                             pending.0.lock().unwrap().push(canonical);
                         }
+                    }
+                }
+            }
+
+            // Spawn nearxd sidecar if no standalone instance is already running
+            #[cfg(unix)]
+            {
+                let socket_path = nearxd_socket_path();
+                let standalone_running =
+                    std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+
+                if standalone_running {
+                    log::info!(
+                        "nearxd already running at {}, skipping sidecar",
+                        socket_path.display()
+                    );
+                } else {
+                    match app.shell().sidecar("nearxd") {
+                        Ok(cmd) => {
+                            let sidecar_sock = std::env::temp_dir().join(format!(
+                                "nearxd-tauri-{}.sock",
+                                std::process::id()
+                            ));
+                            let cmd = cmd.env(
+                                "NEARXD_SOCKET_PATH",
+                                sidecar_sock.to_str().unwrap_or_default(),
+                            );
+
+                            match cmd.spawn() {
+                                Ok((_rx, child)) => {
+                                    log::info!(
+                                        "nearxd sidecar spawned (socket: {})",
+                                        sidecar_sock.display()
+                                    );
+                                    // Point our broker requests at the sidecar socket
+                                    #[allow(deprecated)]
+                                    unsafe {
+                                        env::set_var("NEARXD_SOCKET_PATH", &sidecar_sock);
+                                    }
+                                    app.manage(SidecarChild(Mutex::new(Some(child))));
+
+                                    // Wait briefly for the sidecar to start listening
+                                    for i in 0..20 {
+                                        if UnixStream::connect(&sidecar_sock).is_ok() {
+                                            log::info!("nearxd sidecar ready after {}ms", i * 50);
+                                            break;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                    }
+                                }
+                                Err(e) => log::warn!("nearxd sidecar spawn failed: {e}"),
+                            }
+                        }
+                        Err(e) => log::info!("nearxd sidecar not bundled: {e}"),
                     }
                 }
             }

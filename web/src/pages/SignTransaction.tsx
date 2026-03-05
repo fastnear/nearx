@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Star, Download, KeyRound } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Download, KeyRound } from "lucide-react";
 import { viewAccessKey, broadcastTransaction } from "../api/rpc";
 import {
   signTransaction,
@@ -13,27 +13,10 @@ import type {
   NearCredentialEntry,
 } from "../tauri/runtime";
 import { networkId } from "../config";
+import { useAccountPrefs } from "../hooks/useAccountPrefs";
+import AccountPicker from "../components/AccountPicker";
 
 type ActionType = "Transfer" | "FunctionCall";
-
-interface SignTxPrefs {
-  lastAccountId: string | null;
-  starredAccounts: string[];
-}
-
-const PREFS_KEY = "sign-tx-prefs";
-
-function loadPrefs(): SignTxPrefs {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return { lastAccountId: null, starredAccounts: [] };
-}
-
-function savePrefs(prefs: SignTxPrefs) {
-  localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
-}
 
 const rowClass =
   "flex items-baseline gap-3 border-b border-gray-100 px-4 py-2.5 last:border-b-0";
@@ -44,7 +27,7 @@ const inputClass =
 export default function SignTransaction() {
   const [accounts, setAccounts] = useState<NearCredentialEntry[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
-  const [prefs, setPrefs] = useState<SignTxPrefs>(loadPrefs);
+  const { lastAccountId, toggleStar, setLastAccount, sortAccounts, isStarred } = useAccountPrefs("sign");
   const [manualMode, setManualMode] = useState(false);
 
   const [signerId, setSignerId] = useState("");
@@ -64,6 +47,7 @@ export default function SignTransaction() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importingAccountId, setImportingAccountId] = useState<string | undefined>();
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [debugLog, setDebugLog] = useState<string[]>([]);
 
@@ -96,20 +80,12 @@ export default function SignTransaction() {
     loadAccounts();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sortedAccounts = useMemo(() => {
-    const starred = new Set(prefs.starredAccounts);
-    return [...accounts].sort((a, b) => {
-      const aStarred = starred.has(a.account_id);
-      const bStarred = starred.has(b.account_id);
-      if (aStarred !== bStarred) return aStarred ? -1 : 1;
-      return a.account_id.localeCompare(b.account_id);
-    });
-  }, [accounts, prefs.starredAccounts]);
+  const sortedAccounts = sortAccounts(accounts);
 
   useEffect(() => {
     if (manualMode || accounts.length === 0 || signerId) return;
     const match =
-      accounts.find((a) => a.account_id === prefs.lastAccountId) ||
+      accounts.find((a) => a.account_id === lastAccountId) ||
       sortedAccounts[0];
     if (match) selectAccount(match);
   }, [accounts, manualMode]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -123,18 +99,7 @@ export default function SignTransaction() {
     setSignResult(null);
     setBroadcastResult(null);
     setError(null);
-    const updated = { ...prefs, lastAccountId: entry.account_id };
-    setPrefs(updated);
-    savePrefs(updated);
-  }
-
-  function toggleStar(accountId: string) {
-    const starred = new Set(prefs.starredAccounts);
-    if (starred.has(accountId)) starred.delete(accountId);
-    else starred.add(accountId);
-    const updated = { ...prefs, starredAccounts: [...starred] };
-    setPrefs(updated);
-    savePrefs(updated);
+    setLastAccount(entry.account_id);
   }
 
   const addDebug = useCallback((msg: string) => {
@@ -144,12 +109,14 @@ export default function SignTransaction() {
     setDebugLog((prev) => [...prev, line]);
   }, []);
 
-  const handleImport = useCallback(async () => {
+  const handleImport = useCallback(async (accountId?: string) => {
     setImporting(true);
+    setImportingAccountId(accountId);
     setImportMsg(null);
     setError(null);
     const params = {
       network: networkId,
+      account_id: accountId,
       require_user_presence: true,
       persist_in_keychain: true,
     };
@@ -169,6 +136,13 @@ export default function SignTransaction() {
           ? `Imported ${count} credential${count !== 1 ? "s" : ""} to keychain`
           : `No new credentials imported (${result.skipped?.length ?? 0} skipped, ${result.failed?.length ?? 0} failed)`,
       );
+      if (accountId && count > 0) {
+        setAccounts((prev) =>
+          prev.map((a) =>
+            a.account_id === accountId ? { ...a, in_keychain: true } : a,
+          ),
+        );
+      }
       loadAccounts();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -176,6 +150,7 @@ export default function SignTransaction() {
       setError(msg);
     } finally {
       setImporting(false);
+      setImportingAccountId(undefined);
     }
   }, [loadAccounts, addDebug]);
 
@@ -261,10 +236,6 @@ export default function SignTransaction() {
     }
   }, [signResult]);
 
-  const selectedAccount = accounts.find((a) => a.account_id === signerId);
-  const selectedInKeychain = selectedAccount?.in_keychain ?? false;
-  const needsImport = !manualMode && signerId && !selectedInKeychain && isTauriRuntime();
-
   return (
     <div>
       <h1 className="mb-4 text-xl font-bold">Sign Transaction</h1>
@@ -274,6 +245,18 @@ export default function SignTransaction() {
         <div className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
           <h2 className="text-xs font-medium uppercase text-gray-500">Signer</h2>
           <div className="flex items-center gap-1.5">
+            {!manualMode && accounts.some((a) => a.in_keychain === false) && isTauriRuntime() && (
+              <button
+                type="button"
+                onClick={() => handleImport()}
+                disabled={importing}
+                className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                title="Import all credentials from ~/.near-credentials to keychain"
+              >
+                <Download size={11} />
+                {importing && !importingAccountId ? "Importing\u2026" : "Import All"}
+              </button>
+            )}
             {!manualMode && sortedAccounts.length > 0 && (
               <button
                 type="button"
@@ -289,13 +272,13 @@ export default function SignTransaction() {
                 onClick={() => {
                   setManualMode(false);
                   const match =
-                    accounts.find((a) => a.account_id === prefs.lastAccountId) ||
+                    accounts.find((a) => a.account_id === lastAccountId) ||
                     sortedAccounts[0];
                   if (match) selectAccount(match);
                 }}
                 className="rounded px-2 py-0.5 text-xs text-blue-600 hover:bg-gray-100"
               >
-                Use Dropdown
+                Use List
               </button>
             )}
           </div>
@@ -305,44 +288,22 @@ export default function SignTransaction() {
           <div className="px-4 py-3 text-gray-500">Loading accounts\u2026</div>
         ) : !manualMode && sortedAccounts.length > 0 ? (
           <>
-            <div className={rowClass}>
-              <span className={labelClass}>Account</span>
-              <select
-                className={inputClass}
-                value={signerId}
-                onChange={(e) => {
-                  const entry = accounts.find((a) => a.account_id === e.target.value);
-                  if (entry) selectAccount(entry);
-                }}
-              >
-                {sortedAccounts.map((a) => (
-                  <option key={a.account_id} value={a.account_id}>
-                    {prefs.starredAccounts.includes(a.account_id) ? "\u2605 " : ""}
-                    {a.account_id}
-                    {a.in_keychain === false ? " (not in keychain)" : ""}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => toggleStar(signerId)}
-                className="shrink-0 rounded p-1 hover:bg-gray-100"
-                title={prefs.starredAccounts.includes(signerId) ? "Unstar" : "Star"}
-              >
-                <Star
-                  size={14}
-                  className={
-                    prefs.starredAccounts.includes(signerId)
-                      ? "fill-yellow-400 text-yellow-400"
-                      : "text-gray-400"
-                  }
-                />
-              </button>
-            </div>
-            <div className={rowClass}>
-              <span className={labelClass}>Public Key</span>
-              <code className="flex-1 min-w-0 break-all text-xs text-gray-500">{publicKey}</code>
-            </div>
+            <AccountPicker
+              accounts={sortedAccounts}
+              selectedId={signerId}
+              onSelect={selectAccount}
+              onImport={handleImport}
+              importing={importing}
+              importingAccountId={importingAccountId}
+              isStarred={isStarred}
+              onToggleStar={toggleStar}
+            />
+            {publicKey && (
+              <div className={`border-t border-gray-100 ${rowClass}`}>
+                <span className={labelClass}>Public Key</span>
+                <code className="flex-1 min-w-0 break-all text-xs text-gray-500">{publicKey}</code>
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -365,39 +326,6 @@ export default function SignTransaction() {
               />
             </div>
           </>
-        )}
-
-        {/* Import to Keychain — prominent when selected account is not in keychain */}
-        {!manualMode && isTauriRuntime() && (
-          <div className={`border-t border-gray-100 px-4 py-2.5 ${needsImport ? "bg-amber-50" : ""}`}>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleImport}
-                disabled={importing}
-                className={
-                  needsImport
-                    ? "flex items-center gap-1.5 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                    : "flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
-                }
-                title="Import credentials from ~/.near-credentials to keychain"
-              >
-                <Download size={needsImport ? 14 : 12} />
-                {importing ? "Importing\u2026" : "Import to Keychain"}
-              </button>
-              {needsImport && (
-                <span className="text-xs text-amber-700">
-                  Selected account is not in keychain — import required before signing
-                </span>
-              )}
-              {selectedInKeychain && (
-                <span className="text-xs text-green-600">
-                  <KeyRound size={12} className="mr-0.5 inline" />
-                  In keychain
-                </span>
-              )}
-            </div>
-          </div>
         )}
 
         {importMsg && (

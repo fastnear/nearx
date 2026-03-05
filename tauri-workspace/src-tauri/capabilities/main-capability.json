@@ -8,6 +8,10 @@
     "deep-link:default",
     "clipboard-manager:default",
     {
+      "identifier": "shell:allow-spawn",
+      "allow": [{ "name": "binaries/nearxd", "sidecar": true }]
+    },
+    {
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "https://accounts.google.com/*" },

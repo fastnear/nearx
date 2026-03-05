@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use near_crypto::{PublicKey, SecretKey};
 use near_primitives::action::{Action, FunctionCallAction, TransferAction};
 use near_primitives::hash::CryptoHash;
@@ -34,7 +37,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 const BROKER_VERSION: u8 = 1;
 const DEFAULT_INTENT_TTL_MS: u64 = 2 * 60 * 1000; // 2 minutes
 const MAX_INTENT_TTL_MS: u64 = 10 * 60 * 1000; // 10 minutes
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "nearxd.fastnear.auth";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "fastnear_auth_token";
 const KEYCHAIN_NEAR_CREDENTIAL_SERVICE: &str = "nearxd.near.credentials";
 const KEYCHAIN_SIGNING_SETTINGS_SERVICE: &str = "nearxd.signing.settings";
@@ -108,9 +113,11 @@ impl TokenStore for FileTokenStore {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct MacKeychainTokenStore;
 
+#[cfg(target_os = "macos")]
 impl TokenStore for MacKeychainTokenStore {
     fn backend_name(&self) -> &'static str {
         "keychain"
@@ -129,12 +136,14 @@ impl TokenStore for MacKeychainTokenStore {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct AutoTokenStore {
     primary: Arc<dyn TokenStore>,
     fallback: Arc<dyn TokenStore>,
 }
 
+#[cfg(target_os = "macos")]
 impl TokenStore for AutoTokenStore {
     fn backend_name(&self) -> &'static str {
         self.primary.backend_name()
@@ -279,10 +288,7 @@ fn parse_near_actions(actions_json: &[Value]) -> Result<Vec<Action>, String> {
                     .get("gas")
                     .and_then(Value::as_u64)
                     .unwrap_or(30_000_000_000_000); // 30 TGas default
-                let deposit_str = a
-                    .get("deposit")
-                    .and_then(Value::as_str)
-                    .unwrap_or("0");
+                let deposit_str = a.get("deposit").and_then(Value::as_str).unwrap_or("0");
                 let deposit: u128 = deposit_str
                     .parse()
                     .map_err(|e| format!("action[{i}]: invalid deposit: {e}"))?;
@@ -438,96 +444,66 @@ fn clear_file_token() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn keychain_read_generic(service: &str, account: &str) -> Option<String> {
-    use std::process::Command;
-
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    security_framework::passwords::get_generic_password(service, account)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
 #[cfg(target_os = "macos")]
 fn keychain_write_generic(service: &str, account: &str, value: &str) -> Result<(), String> {
-    use std::process::Command;
-
-    let status = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-            value,
-        ])
-        .status()
-        .map_err(|e| format!("security add-generic-password failed: {e}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err("security add-generic-password returned non-zero status".to_string())
-    }
+    security_framework::passwords::set_generic_password(service, account, value.as_bytes())
+        .map_err(|e| format!("keychain write failed: {e}"))
 }
 
 #[cfg(target_os = "macos")]
 fn keychain_delete_generic(service: &str, account: &str) -> Result<(), String> {
-    use std::process::Command;
-
-    let status = Command::new("security")
-        .args(["delete-generic-password", "-s", service, "-a", account])
-        .status()
-        .map_err(|e| format!("security delete-generic-password failed: {e}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        // Treat missing item as cleared for idempotency.
-        Ok(())
-    }
+    // Treat not-found as success for idempotency.
+    let _ = security_framework::passwords::delete_generic_password(service, account);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn keychain_has_generic(service: &str, account: &str) -> bool {
-    let script = r#"
-import Foundation
-import Security
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::dictionary::{
+        kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreateMutable,
+        CFDictionarySetValue,
+    };
+    use security_framework_sys::item::*;
+    use security_framework_sys::keychain_item::SecItemCopyMatching;
 
-let service = CommandLine.arguments[1]
-let account = CommandLine.arguments[2]
+    let service_cf = CFString::new(service);
+    let account_cf = CFString::new(account);
 
-let query: [String: Any] = [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrService as String: service,
-    kSecAttrAccount as String: account,
-    kSecReturnAttributes as String: true,
-    kSecMatchLimit as String: kSecMatchLimitOne
-]
+    unsafe {
+        let query = CFDictionaryCreateMutable(
+            std::ptr::null(),
+            0,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        );
+        CFDictionarySetValue(query, kSecClass as _, kSecClassGenericPassword as _);
+        CFDictionarySetValue(
+            query,
+            kSecAttrService as _,
+            service_cf.as_concrete_TypeRef() as _,
+        );
+        CFDictionarySetValue(
+            query,
+            kSecAttrAccount as _,
+            account_cf.as_concrete_TypeRef() as _,
+        );
+        CFDictionarySetValue(
+            query,
+            kSecReturnAttributes as _,
+            CFBoolean::true_value().as_CFTypeRef() as _,
+        );
 
-let status = SecItemCopyMatching(query as CFDictionary, nil)
-if status == errSecSuccess {
-    print("{\"found\":true}")
-    exit(0)
-}
-print("{\"found\":false}")
-exit(0)
-"#;
-
-    match run_swift_json(script, &[service, account]) {
-        Ok(v) => v.get("found").and_then(Value::as_bool).unwrap_or(false),
-        Err(_) => false,
+        let status = SecItemCopyMatching(query as _, std::ptr::null_mut());
+        core_foundation_sys::base::CFRelease(query as _);
+        status == 0
     }
 }
 
@@ -542,6 +518,7 @@ fn keychain_write_generic(_service: &str, _account: &str, _value: &str) -> Resul
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn keychain_delete_generic(_service: &str, _account: &str) -> Result<(), String> {
     Err("keychain backend unavailable on this platform".to_string())
 }
@@ -551,14 +528,32 @@ fn keychain_has_generic(_service: &str, _account: &str) -> bool {
     false
 }
 
+/// Check keychain existence for multiple accounts via native Security framework FFI.
+/// Each call is <1ms, so a simple loop is fast enough.
+#[cfg(target_os = "macos")]
+fn keychain_has_generic_batch(service: &str, accounts: &[&str]) -> Vec<bool> {
+    accounts
+        .iter()
+        .map(|a| keychain_has_generic(service, a))
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_has_generic_batch(_service: &str, accounts: &[&str]) -> Vec<bool> {
+    vec![false; accounts.len()]
+}
+
+#[cfg(target_os = "macos")]
 fn read_keychain_token() -> Option<String> {
     keychain_read_generic(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
 }
 
+#[cfg(target_os = "macos")]
 fn persist_keychain_token(token: &str) -> Result<(), String> {
     keychain_write_generic(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, token)
 }
 
+#[cfg(target_os = "macos")]
 fn clear_keychain_token() -> Result<(), String> {
     keychain_delete_generic(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
 }
@@ -687,90 +682,108 @@ fn keychain_write_generic_protected(
     value: &str,
     biometry_only: bool,
 ) -> Result<(), String> {
-    let script = r#"
-import Foundation
-import Security
+    use core_foundation::base::TCFType;
+    use core_foundation::data::CFData;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::base::CFRelease;
+    use core_foundation_sys::dictionary::{
+        kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreateMutable,
+        CFDictionarySetValue,
+    };
+    use security_framework_sys::access_control::{
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly, SecAccessControlCreateWithFlags,
+    };
+    use security_framework_sys::item::*;
+    use security_framework_sys::keychain_item::{SecItemAdd, SecItemDelete};
 
-let service = CommandLine.arguments[1]
-let account = CommandLine.arguments[2]
-let value = CommandLine.arguments[3]
-let biometryOnly = CommandLine.arguments.count > 4 ? (CommandLine.arguments[4] == "1") : true
+    // SecAccessControlCreateFlags (CFOptionFlags = usize on Apple platforms)
+    const USER_PRESENCE: usize = 1 << 0;
+    const BIOMETRY_CURRENT_SET: usize = 1 << 3;
 
-guard let data = value.data(using: .utf8) else {
-    fputs("failed to encode value", stderr)
-    exit(2)
-}
+    let service_cf = CFString::new(service);
+    let account_cf = CFString::new(account);
+    let data = CFData::from_buffer(value.as_bytes());
 
-let deleteQuery: [String: Any] = [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrService as String: service,
-    kSecAttrAccount as String: account
-]
-SecItemDelete(deleteQuery as CFDictionary)
+    unsafe {
+        // Delete existing item first
+        let dq = CFDictionaryCreateMutable(
+            std::ptr::null(),
+            0,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        );
+        CFDictionarySetValue(dq, kSecClass as _, kSecClassGenericPassword as _);
+        CFDictionarySetValue(
+            dq,
+            kSecAttrService as _,
+            service_cf.as_concrete_TypeRef() as _,
+        );
+        CFDictionarySetValue(
+            dq,
+            kSecAttrAccount as _,
+            account_cf.as_concrete_TypeRef() as _,
+        );
+        SecItemDelete(dq as _);
+        CFRelease(dq as _);
 
-// Try protected write (requires code-signed binary with entitlements)
-let flags: SecAccessControlCreateFlags = biometryOnly ? .biometryCurrentSet : .userPresence
-var acError: Unmanaged<CFError>?
-if let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &acError) {
-    let addQuery: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: account,
-        kSecValueData as String: data,
-        kSecAttrAccessControl as String: access
-    ]
-    let status = SecItemAdd(addQuery as CFDictionary, nil)
-    if status == errSecSuccess {
-        let out: [String: Any] = [
-            "stored": true,
-            "protection": biometryOnly ? "biometry_current_set" : "user_presence"
-        ]
-        let json = try JSONSerialization.data(withJSONObject: out, options: [])
-        print(String(data: json, encoding: .utf8)!)
-        exit(0)
+        // Try protected write (requires code-signed binary with entitlements)
+        let flags = if biometry_only {
+            BIOMETRY_CURRENT_SET
+        } else {
+            USER_PRESENCE
+        };
+
+        let mut error: core_foundation_sys::error::CFErrorRef = std::ptr::null_mut();
+        let access = SecAccessControlCreateWithFlags(
+            std::ptr::null(),
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly as _,
+            flags,
+            &mut error,
+        );
+
+        if !access.is_null() {
+            let aq = CFDictionaryCreateMutable(
+                std::ptr::null(),
+                0,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            CFDictionarySetValue(aq, kSecClass as _, kSecClassGenericPassword as _);
+            CFDictionarySetValue(
+                aq,
+                kSecAttrService as _,
+                service_cf.as_concrete_TypeRef() as _,
+            );
+            CFDictionarySetValue(
+                aq,
+                kSecAttrAccount as _,
+                account_cf.as_concrete_TypeRef() as _,
+            );
+            CFDictionarySetValue(aq, kSecValueData as _, data.as_CFTypeRef() as _);
+            CFDictionarySetValue(aq, kSecAttrAccessControl as _, access as _);
+
+            let status = SecItemAdd(aq as _, std::ptr::null_mut());
+            CFRelease(aq as _);
+            CFRelease(access as _);
+
+            if status == 0 {
+                return Ok(());
+            }
+
+            // -34018 = errSecMissingEntitlement — binary not code-signed for protected keychain
+            if status != -34018 {
+                return Err(format!("SecItemAdd failed with status {status}"));
+            }
+            log::warn!(
+                "Protected SecItemAdd failed (-34018), falling back to unprotected keychain"
+            );
+        }
+
+        // Fallback: store without biometry protection (works for unsigned CLI binaries)
+        log::info!("falling back to unprotected keychain write for {service}/{account}");
+        security_framework::passwords::set_generic_password(service, account, value.as_bytes())
+            .map_err(|e| format!("keychain write fallback failed: {e}"))
     }
-    // -34018 = errSecMissingEntitlement — binary not code-signed for protected keychain
-    if status != -34018 {
-        fputs("SecItemAdd failed with status \(status)", stderr)
-        exit(3)
-    }
-    fputs("Protected SecItemAdd failed (-34018), falling back to unprotected keychain\n", stderr)
-}
-
-// Fallback: store without biometry protection (works for unsigned CLI binaries)
-let fallbackQuery: [String: Any] = [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrService as String: service,
-    kSecAttrAccount as String: account,
-    kSecValueData as String: data,
-    kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
-]
-let fallbackStatus = SecItemAdd(fallbackQuery as CFDictionary, nil)
-if fallbackStatus == errSecSuccess {
-    let out: [String: Any] = [
-        "stored": true,
-        "protection": "when_unlocked",
-        "fallback": true
-    ]
-    let json = try JSONSerialization.data(withJSONObject: out, options: [])
-    print(String(data: json, encoding: .utf8)!)
-    exit(0)
-}
-
-fputs("SecItemAdd fallback also failed with status \(fallbackStatus)", stderr)
-exit(3)
-"#;
-
-    let _ = run_swift_json(
-        script,
-        &[
-            service,
-            account,
-            value,
-            if biometry_only { "1" } else { "0" },
-        ],
-    )?;
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -959,7 +972,7 @@ exit(3)
     run_swift_json(script, &[reason, if allow_fallback { "1" } else { "0" }])
 }
 
-fn probe_user_presence(allow_fallback: bool) -> Value {
+fn probe_user_presence(_allow_fallback: bool) -> Value {
     let adapter = user_presence_adapter();
     match adapter.as_str() {
         "mock" => json!({
@@ -978,7 +991,7 @@ fn probe_user_presence(allow_fallback: bool) -> Value {
         "swift" | "auto" => {
             #[cfg(target_os = "macos")]
             {
-                match swift_probe_user_presence(allow_fallback) {
+                match swift_probe_user_presence(_allow_fallback) {
                     Ok(mut v) => {
                         if let Some(obj) = v.as_object_mut() {
                             obj.insert("adapter".to_string(), json!("swift"));
@@ -1015,7 +1028,7 @@ fn probe_user_presence(allow_fallback: bool) -> Value {
     }
 }
 
-fn request_user_presence(reason: &str, allow_fallback: bool) -> Result<Value, String> {
+fn request_user_presence(_reason: &str, _allow_fallback: bool) -> Result<Value, String> {
     let adapter = user_presence_adapter();
     match adapter.as_str() {
         "mock" => Ok(json!({
@@ -1030,7 +1043,7 @@ fn request_user_presence(reason: &str, allow_fallback: bool) -> Result<Value, St
         "swift" | "auto" => {
             #[cfg(target_os = "macos")]
             {
-                let mut v = swift_request_user_presence(reason, allow_fallback)?;
+                let mut v = swift_request_user_presence(_reason, _allow_fallback)?;
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("adapter".to_string(), json!("swift"));
                 }
@@ -1268,6 +1281,7 @@ fn cleanup_expired_intents(state: &BrokerState) {
     }
 }
 
+#[allow(clippy::needless_return)]
 fn open_url(url: &str) -> Result<(), String> {
     use std::process::Command;
 
@@ -1372,6 +1386,15 @@ fn route_to_json(route: &nearx::router::Route) -> Value {
             "route": "access-key",
             "account_id": account_id,
             "public_key": public_key,
+            "network": network.as_ref().map(network_to_str),
+        }),
+        Route::V1(RouteV1::Staking {
+            account_id,
+            network,
+        }) => json!({
+            "version": "v1",
+            "route": "staking",
+            "account_id": account_id,
             "network": network.as_ref().map(network_to_str),
         }),
     }
@@ -1622,18 +1645,29 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
                 }
             };
 
-            let mut accounts = Vec::new();
+            let mut summaries = Vec::new();
             for file in &files {
                 if let Ok((account_id, public_key)) = list_credential_summary(file) {
-                    let keychain_account = format!("{network}:{account_id}");
-                    let in_keychain =
-                        keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &keychain_account);
-                    accounts.push(json!({
-                        "account_id": account_id,
-                        "public_key": public_key,
-                        "in_keychain": in_keychain,
-                    }));
+                    summaries.push((account_id, public_key));
                 }
+            }
+
+            let keychain_accounts: Vec<String> = summaries
+                .iter()
+                .map(|(aid, _)| format!("{network}:{aid}"))
+                .collect();
+            let keychain_refs: Vec<&str> = keychain_accounts.iter().map(|s| s.as_str()).collect();
+            let in_keychain_flags =
+                keychain_has_generic_batch(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &keychain_refs);
+
+            let mut accounts = Vec::new();
+            for (i, (account_id, public_key)) in summaries.into_iter().enumerate() {
+                let in_keychain = in_keychain_flags.get(i).copied().unwrap_or(false);
+                accounts.push(json!({
+                    "account_id": account_id,
+                    "public_key": public_key,
+                    "in_keychain": in_keychain,
+                }));
             }
 
             BrokerResponse::ok(
@@ -2127,11 +2161,7 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
             let signer_id: AccountId = match signer_id_str.parse() {
                 Ok(v) => v,
                 Err(e) => {
-                    return BrokerResponse::err(
-                        id,
-                        "ERR_PARAMS",
-                        format!("invalid signer_id: {e}"),
-                    )
+                    return BrokerResponse::err(id, "ERR_PARAMS", format!("invalid signer_id: {e}"))
                 }
             };
 
@@ -2206,17 +2236,16 @@ fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerRespons
                 .to_ascii_lowercase();
             let reason = parse_string(&req.params, "reason")
                 .unwrap_or("NEARx needs your approval to sign a transaction.");
-            let credential =
-                match read_near_credential_keychain(&network, signer_id_str, reason) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return BrokerResponse::err(
-                            id,
-                            "ERR_AUTH",
-                            format!("credential read failed: {e}"),
-                        )
-                    }
-                };
+            let credential = match read_near_credential_keychain(&network, signer_id_str, reason) {
+                Ok(v) => v,
+                Err(e) => {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_AUTH",
+                        format!("credential read failed: {e}"),
+                    )
+                }
+            };
 
             // Extract and parse private key
             let Some(private_key_str) = credential.get("private_key").and_then(Value::as_str)

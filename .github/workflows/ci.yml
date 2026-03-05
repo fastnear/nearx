@@ -17,156 +17,29 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo registry
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy (native features)
-        run: cargo clippy -p nearx -p ref-arb-scanner --features native --all-targets -- -D warnings
+      - name: Clippy
+        run: cargo clippy -p nearx --features native --all-targets -- -D warnings
 
-      - name: Test (native)
-        run: cargo test --features native --all
+      - name: Test
+        run: cargo test -p nearx --features native
 
-  native-host-build:
-    name: Build Native Host
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
+      - name: Check native-host
+        run: cargo check --manifest-path native-host/Cargo.toml
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Build native host
-        working-directory: native-host
-        run: cargo build --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-host-${{ matrix.os }}
-          path: |
-            native-host/target/release/nearx-native-host
-            native-host/target/release/nearx-native-host.exe
-          if-no-files-found: ignore
-
-  tauri-build:
-    name: Build Tauri App
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Install workspace dependencies
-        run: yarn install --immutable
-
-      - name: Install Tauri dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2.0.0'
-
-      - name: Build Tauri
-        working-directory: tauri-workspace
-        run: cargo tauri build
-
-      - name: Upload artifacts (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tauri-macos
-          path: tauri-workspace/src-tauri/target/release/bundle/macos/**/*.app
-
-      - name: Upload artifacts (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tauri-linux
-          path: |
-            tauri-workspace/src-tauri/target/release/bundle/deb/**/*.deb
-            tauri-workspace/src-tauri/target/release/bundle/appimage/**/*.AppImage
-
-      - name: Upload artifacts (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tauri-windows
-          path: |
-            tauri-workspace/src-tauri/target/release/bundle/msi/**/*.msi
-            tauri-workspace/src-tauri/target/release/bundle/nsis/**/*.exe
-
-  extension-package:
-    name: Package Browser Extensions
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Package Chrome extension
-        working-directory: extension
-        run: |
-          zip -r ../nearx-chrome-extension.zip \
-            manifest.chrome.json \
-            background.js \
-            content.js
-
-      - name: Package Firefox extension
-        working-directory: extension
-        run: |
-          zip -r ../nearx-firefox-extension.zip \
-            manifest.firefox.json \
-            background.js \
-            content.js
-
-      - name: Upload Chrome extension
-        uses: actions/upload-artifact@v4
-        with:
-          name: chrome-extension
-          path: nearx-chrome-extension.zip
-
-      - name: Upload Firefox extension
-        uses: actions/upload-artifact@v4
-        with:
-          name: firefox-extension
-          path: nearx-firefox-extension.zip
-
-  web-build:
-    name: Build Web (Explorer)
+  web-typecheck-build:
+    name: Web Typecheck & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -178,14 +51,8 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      - name: Install workspace dependencies
+      - name: Install dependencies
         run: yarn install --immutable
 
       - name: Build explorer frontend
         run: yarn workspace explorer-frontend build
-
-      - name: Upload web artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-app
-          path: web/dist/

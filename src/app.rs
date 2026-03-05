@@ -295,6 +295,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         fps: u32,
         fps_choices: Vec<u32>,
@@ -1297,6 +1298,15 @@ impl App {
                 self.clear_filter();
                 self.return_to_auto_follow();
                 self.log_debug("Route: home".to_string());
+            }
+            Route::V1(RouteV1::Staking {
+                account_id,
+                network,
+            }) => {
+                // Staking is web/Tauri-only; TUI ignores this route
+                self.log_debug(format!(
+                    "Route: staking account={account_id:?} network={network:?} (ignored in TUI)"
+                ));
             }
         }
     }

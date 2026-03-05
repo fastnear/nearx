@@ -1,9 +1,7 @@
 name: GOE ablation check
 
 on:
-  push:
-  pull_request:
-  workflow_dispatch:
+  workflow_dispatch: # Manual trigger only — auto-trigger disabled (missing binaries/scripts)
     inputs:
       mode:
         description: "Gate mode: warn or strict"
