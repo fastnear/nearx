@@ -20,7 +20,7 @@ required-features = ["proxy"]
 
 [[bin]]
 name = "nearxd"
-path = "src/bin/nearxd.rs"
+path = "src/bin/nearxd/main.rs"
 
 [workspace]
 resolver = "2"
@@ -111,6 +111,7 @@ base64 = "0.22"
 borsh = "1"
 cfg-if = "1"
 urlencoding = "2.1"
+slipped10 = "0.4.6"
 
 # Ratatui (with conditional backend)
 ratatui = { version = "0.29", default-features = false }
@@ -183,6 +184,9 @@ security-framework = "2"
 security-framework-sys = "2"
 core-foundation = "0.9"
 core-foundation-sys = "0.8"
+ledger-apdu = "0.11"
+ledger-transport = "0.11"
+ledger-transport-hid = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
