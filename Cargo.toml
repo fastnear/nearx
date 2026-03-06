@@ -184,6 +184,8 @@ security-framework = "2"
 security-framework-sys = "2"
 core-foundation = "0.9"
 core-foundation-sys = "0.8"
+
+[target.'cfg(unix)'.dependencies]
 ledger-apdu = "0.11"
 ledger-transport = "0.11"
 ledger-transport-hid = "0.11"

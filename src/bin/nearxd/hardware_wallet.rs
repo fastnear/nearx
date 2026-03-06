@@ -90,30 +90,30 @@ fn mock_ledger_sign_transaction(
     Ok(mock_ledger_secret_key(path).sign(tx_hash.as_ref()))
 }
 
-// Ledger APDU constants and functions (macOS-only)
+// Ledger APDU constants and functions (unix: macOS and Linux)
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_CLA: u8 = 0x80;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_INS_GET_PUBLIC_KEY: u8 = 0x04;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_INS_SIGN_TRANSACTION: u8 = 0x02;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_RETURN_CODE_OK: u16 = 0x9000;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_CHUNK_SIZE: usize = 250;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_NETWORK_ID: u8 = b'W';
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_P1_GET_PUBLIC_KEY_DISPLAY: u8 = 0x00;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_P1_GET_PUBLIC_KEY_SILENT: u8 = 0x01;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_P1_SIGN_CHUNK: u8 = 0x00;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 const LEDGER_P1_SIGN_LAST_CHUNK: u8 = 0x80;
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn map_ledger_retcode(retcode: u16) -> HardwareWalletError {
     match retcode {
         0x5501 => HardwareWalletError::new(
@@ -139,7 +139,7 @@ fn map_ledger_retcode(retcode: u16) -> HardwareWalletError {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn map_ledger_transport_error(err: impl ToString) -> HardwareWalletError {
     let msg = err.to_string();
     let lower = msg.to_ascii_lowercase();
@@ -153,14 +153,14 @@ fn map_ledger_transport_error(err: impl ToString) -> HardwareWalletError {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_hd_path_to_bytes(hd_path: &slipped10::BIP32Path) -> Vec<u8> {
     (0..hd_path.depth())
         .flat_map(|index| hd_path.index(index).unwrap().to_be_bytes())
         .collect::<Vec<u8>>()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_get_transport() -> Result<ledger_transport_hid::TransportNativeHID, HardwareWalletError> {
     use ledger_transport_hid::hidapi::{HidApi, HidError};
     use ledger_transport_hid::LedgerHIDError;
@@ -170,7 +170,7 @@ fn ledger_get_transport() -> Result<ledger_transport_hid::TransportNativeHID, Ha
         .map_err(|e: LedgerHIDError| map_ledger_transport_error(format!("{e:?}")))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_exchange(
     command: &ledger_transport::APDUCommand<Vec<u8>>,
 ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, HardwareWalletError> {
@@ -182,7 +182,7 @@ fn ledger_exchange(
         .map_err(|e: LedgerHIDError| map_ledger_transport_error(format!("{e:?}")))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_running_app_name() -> Result<String, HardwareWalletError> {
     let command = ledger_transport::APDUCommand {
         cla: 0xB0,
@@ -212,7 +212,7 @@ fn ledger_running_app_name() -> Result<String, HardwareWalletError> {
     Ok(String::from_utf8_lossy(&data[2..2 + name_len]).to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_quit_current_app() -> Result<(), HardwareWalletError> {
     let command = ledger_transport::APDUCommand {
         cla: 0xB0,
@@ -229,7 +229,7 @@ fn ledger_quit_current_app() -> Result<(), HardwareWalletError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_open_near_app() -> Result<(), HardwareWalletError> {
     match ledger_running_app_name()?.as_str() {
         "NEAR" => return Ok(()),
@@ -255,7 +255,7 @@ fn ledger_open_near_app() -> Result<(), HardwareWalletError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_get_public_key(
     derivation_path: &slipped10::BIP32Path,
     display_confirm: bool,
@@ -292,7 +292,7 @@ fn ledger_get_public_key(
     )))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn ledger_sign_transaction(
     unsigned_tx: &[u8],
     derivation_path: &slipped10::BIP32Path,
@@ -336,11 +336,11 @@ fn ledger_sign_transaction(
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(unix))]
 fn ledger_open_near_app() -> Result<(), HardwareWalletError> {
     Err(HardwareWalletError::new(
         "ERR_UNAVAILABLE",
-        "hardware wallet support is only available on macOS",
+        "hardware wallet support requires a Unix platform (macOS or Linux)",
     ))
 }
 
@@ -365,17 +365,17 @@ pub(crate) fn hardware_wallet_get_public_key(
         "mock" => Ok(mock_ledger_get_public_key(derivation_path)),
         "auto" | "hid" => {
             let path = parse_ledger_derivation_path(Some(derivation_path))?;
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             {
                 ledger_open_near_app()?;
                 return ledger_get_public_key(&path, display_confirm);
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(unix))]
             {
                 let _ = (path, display_confirm);
                 Err(HardwareWalletError::new(
                     "ERR_UNAVAILABLE",
-                    "hardware wallet support is only available on macOS",
+                    "hardware wallet support requires a Unix platform (macOS or Linux)",
                 ))
             }
         }
@@ -407,17 +407,17 @@ pub(crate) fn hardware_wallet_sign_transaction(
         "mock" => mock_ledger_sign_transaction(unsigned_tx, derivation_path),
         "auto" | "hid" => {
             let path = parse_ledger_derivation_path(Some(derivation_path))?;
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             {
                 ledger_open_near_app()?;
                 return ledger_sign_transaction(unsigned_tx, &path);
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(unix))]
             {
                 let _ = (path, unsigned_tx);
                 Err(HardwareWalletError::new(
                     "ERR_UNAVAILABLE",
-                    "hardware wallet support is only available on macOS",
+                    "hardware wallet support requires a Unix platform (macOS or Linux)",
                 ))
             }
         }
