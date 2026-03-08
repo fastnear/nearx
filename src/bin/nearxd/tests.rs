@@ -15,19 +15,23 @@ use std::sync::Arc;
 
 use crate::broker::{handle_request, BrokerRequest, BrokerState};
 use crate::credentials::{
-    nearxd_credential_account_legacy, KEYCHAIN_NEAR_CREDENTIAL_SERVICE, SOURCE_HARDWARE_WALLET,
+    nearxd_credential_account_key, nearxd_credential_account_legacy,
+    KEYCHAIN_NEAR_CREDENTIAL_SERVICE, SOURCE_HARDWARE_WALLET, SOURCE_LEGACY_FILE,
     SOURCE_NEARXD_KEYCHAIN, SOURCE_NEAR_CLI_SECURE,
 };
 use crate::hardware_wallet::{
     mock_ledger_get_public_key, DEFAULT_LEDGER_DERIVATION_PATH, HARDWARE_WALLET_TYPE_LEDGER,
 };
-use crate::keychain::{keychain_delete_generic, keychain_write_generic};
-use crate::settings::{
-    write_signing_settings_file, HARDWARE_WALLET_INDEX_KEY, HARDWARE_WALLET_INDEX_VERSION,
-    SIGNING_KEY_INDEX_KEY, SIGNING_KEY_INDEX_VERSION, SIGNING_KEY_PRUNE_AFTER_MS,
-    SIGNING_KEY_STALE_AFTER_MS,
+use crate::keychain::{
+    keychain_delete_generic, keychain_has_generic, keychain_read_generic, keychain_write_generic,
 };
-use crate::signing::build_signing_keys;
+use crate::settings::{
+    staking_watchlist_for_network, write_signing_settings_file, HARDWARE_WALLET_INDEX_KEY,
+    HARDWARE_WALLET_INDEX_VERSION, KEYCHAIN_SIGNING_SETTINGS_ACCOUNT,
+    KEYCHAIN_SIGNING_SETTINGS_SERVICE, SIGNING_KEY_INDEX_KEY, SIGNING_KEY_INDEX_VERSION,
+    SIGNING_KEY_PRUNE_AFTER_MS, SIGNING_KEY_STALE_AFTER_MS, STAKING_WATCHLIST_KEY,
+};
+use crate::signing::{build_signing_keys, discover_signing_accounts};
 use crate::util::now_ms;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -80,6 +84,53 @@ fn with_env_vars<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
         }
     }
     out
+}
+
+fn implicit_account_id_from_public_key(public_key: &near_crypto::PublicKey) -> String {
+    public_key
+        .key_data()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn is_skippable_keychain_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("authorization was canceled")
+        || lower.contains("user interaction is not allowed")
+        || lower.contains("interaction not allowed")
+        || lower.contains("keychain backend unavailable")
+}
+
+fn maybe_skip_keychain_test(test_name: &str, err: &str) -> bool {
+    if is_skippable_keychain_error(err) {
+        eprintln!("[nearxd:test-skip] {test_name}: {err}");
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_tests_enabled() -> bool {
+    let Ok(raw) = std::env::var("NEARXD_RUN_KEYCHAIN_TESTS") else {
+        return false;
+    };
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_skip_keychain_integration_test(test_name: &str) -> bool {
+    if keychain_tests_enabled() {
+        return false;
+    }
+    eprintln!(
+        "[nearxd:test-skip] {test_name}: set NEARXD_RUN_KEYCHAIN_TESTS=1 to enable macOS keychain integration tests"
+    );
+    true
 }
 
 fn mktemp_dir(prefix: &str) -> PathBuf {
@@ -164,7 +215,7 @@ fn write_near_cli_secure_test_credential_with_key_type(
     account_id: &str,
     key_type: near_crypto::KeyType,
     seed: &str,
-) -> (String, String, String, String) {
+) -> Result<(String, String, String, String), String> {
     let secret = SecretKey::from_seed(key_type, seed);
     let public_key = secret.public_key().to_string();
     let private_key = secret.to_string();
@@ -176,8 +227,9 @@ fn write_near_cli_secure_test_credential_with_key_type(
         "private_key": private_key,
     });
     let encoded = serde_json::to_string(&payload).expect("encode near-cli credential");
-    keychain_write_generic(&service, &account, &encoded).expect("write near-cli credential");
-    (service, account, public_key, private_key)
+    keychain_write_generic(&service, &account, &encoded)
+        .map_err(|e| format!("write near-cli credential failed: {e}"))?;
+    Ok((service, account, public_key, private_key))
 }
 
 #[cfg(target_os = "macos")]
@@ -185,13 +237,36 @@ fn write_near_cli_secure_test_credential(
     network: &str,
     account_id: &str,
     seed: &str,
-) -> (String, String, String, String) {
+) -> Result<(String, String, String, String), String> {
     write_near_cli_secure_test_credential_with_key_type(
         network,
         account_id,
         near_crypto::KeyType::ED25519,
         seed,
     )
+}
+
+#[cfg(target_os = "macos")]
+fn write_legacy_nearxd_test_credential(
+    network: &str,
+    account_id: &str,
+    seed: &str,
+) -> Result<(String, String, String, String), String> {
+    let secret = SecretKey::from_seed(near_crypto::KeyType::ED25519, seed);
+    let public_key = secret.public_key().to_string();
+    let private_key = secret.to_string();
+    let legacy_account = nearxd_credential_account_legacy(network, account_id);
+    let payload = json!({
+        "network": network,
+        "account_id": account_id,
+        "public_key": public_key,
+        "private_key": private_key,
+        "imported_at_ms": now_ms(),
+    });
+    let encoded = serde_json::to_string(&payload).expect("encode legacy nearxd credential");
+    keychain_write_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account, &encoded)
+        .map_err(|e| format!("write legacy nearxd credential failed: {e}"))?;
+    Ok((legacy_account, public_key, private_key, payload.to_string()))
 }
 
 #[test]
@@ -493,12 +568,155 @@ fn get_near_credential_near_cli_secure_requires_public_key() {
     assert_eq!(resp.error.as_ref().map(|e| e.code), Some("ERR_PARAMS"));
 }
 
+#[test]
+fn get_near_credential_reads_legacy_file_directly() {
+    let home = mktemp_dir("nearxd-legacy-file-read");
+    let home_str = home.display().to_string();
+    let credentials_home = home.join(".near-credentials");
+    let network_dir = credentials_home.join("testnet");
+    fs::create_dir_all(&network_dir).expect("create credentials dir");
+
+    let account_id = unique_test_account_id();
+    let secret = SecretKey::from_seed(near_crypto::KeyType::ED25519, "nearx-legacy-read-seed");
+    let public_key = secret.public_key().to_string();
+    fs::write(
+        network_dir.join(format!("{account_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "account_id": account_id,
+            "public_key": public_key,
+            "private_key": secret.to_string(),
+        }))
+        .expect("encode legacy credential"),
+    )
+    .expect("write legacy credential");
+
+    with_env_var("HOME", Some(home_str.as_str()), || {
+        let state = Arc::new(BrokerState::default());
+        let resp = handle_request(
+            &state,
+            BrokerRequest {
+                id: Some("legacy-read".to_string()),
+                method: "get_near_credential".to_string(),
+                params: json!({
+                    "network": "testnet",
+                    "account_id": account_id,
+                    "public_key": public_key,
+                    "credential_source": SOURCE_LEGACY_FILE,
+                }),
+            },
+        );
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("credential_source"))
+                .and_then(Value::as_str),
+            Some(SOURCE_LEGACY_FILE)
+        );
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("credential"))
+                .and_then(|v| v.get("public_key"))
+                .and_then(Value::as_str),
+            Some(public_key.as_str())
+        );
+    });
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn sign_transaction_falls_back_to_legacy_file_when_it_is_the_only_source() {
+    let home = mktemp_dir("nearxd-legacy-sign");
+    let home_str = home.display().to_string();
+    let credentials_home = home.join(".near-credentials");
+    let network_dir = credentials_home.join("testnet");
+    fs::create_dir_all(&network_dir).expect("create credentials dir");
+
+    let account_id = unique_test_account_id();
+    let secret = SecretKey::from_seed(near_crypto::KeyType::ED25519, "nearx-legacy-sign-seed");
+    let public_key = secret.public_key().to_string();
+    fs::write(
+        network_dir.join(format!("{account_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "account_id": account_id,
+            "public_key": public_key,
+            "private_key": secret.to_string(),
+        }))
+        .expect("encode legacy credential"),
+    )
+    .expect("write legacy credential");
+
+    with_env_vars(
+        &[
+            ("HOME", Some(home_str.as_str())),
+            ("NEAR_NODE_URL", Some("http://127.0.0.1:1")),
+        ],
+        || {
+            let state = Arc::new(BrokerState::default());
+            let resp = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("legacy-sign".to_string()),
+                    method: "sign_transaction".to_string(),
+                    params: json!({
+                        "signer_id": account_id,
+                        "signer_public_key": public_key,
+                        "receiver_id": "receiver.testnet",
+                        "nonce": 1,
+                        "block_hash": "11111111111111111111111111111111",
+                        "actions": [{ "type": "Transfer", "deposit": "1" }],
+                        "network": "testnet",
+                        "reason": "test legacy sign fallback",
+                    }),
+                },
+            );
+            assert!(resp.ok);
+            assert_eq!(
+                resp.result
+                    .as_ref()
+                    .and_then(|v| v.get("credential_source"))
+                    .and_then(Value::as_str),
+                Some(SOURCE_LEGACY_FILE)
+            );
+            assert_eq!(
+                resp.result
+                    .as_ref()
+                    .and_then(|v| v.get("public_key"))
+                    .and_then(Value::as_str),
+                Some(public_key.as_str())
+            );
+        },
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn get_near_credential_reads_near_cli_secure_directly() {
+    if maybe_skip_keychain_integration_test("get_near_credential_reads_near_cli_secure_directly") {
+        return;
+    }
     let account_id = unique_test_account_id();
     let (service, keychain_account, public_key, private_key) =
-        write_near_cli_secure_test_credential("testnet", &account_id, "nearx-direct-read-seed");
+        match write_near_cli_secure_test_credential(
+            "testnet",
+            &account_id,
+            "nearx-direct-read-seed",
+        ) {
+            Ok(v) => v,
+            Err(err) => {
+                if maybe_skip_keychain_test(
+                    "get_near_credential_reads_near_cli_secure_directly",
+                    &err,
+                ) {
+                    return;
+                }
+                panic!("{err}");
+            }
+        };
 
     let state = Arc::new(BrokerState::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -550,11 +768,45 @@ fn get_near_credential_reads_near_cli_secure_directly() {
 #[cfg(target_os = "macos")]
 #[test]
 fn sign_transaction_uses_explicit_signer_public_key_from_near_cli_secure() {
+    if maybe_skip_keychain_integration_test(
+        "sign_transaction_uses_explicit_signer_public_key_from_near_cli_secure",
+    ) {
+        return;
+    }
     let account_id = unique_test_account_id();
-    let (service1, keychain_account1, public_key1, _) =
-        write_near_cli_secure_test_credential("testnet", &account_id, "nearx-explicit-key-seed-1");
-    let (service2, keychain_account2, public_key2, _) =
-        write_near_cli_secure_test_credential("testnet", &account_id, "nearx-explicit-key-seed-2");
+    let (service1, keychain_account1, public_key1, _) = match write_near_cli_secure_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-explicit-key-seed-1",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            if maybe_skip_keychain_test(
+                "sign_transaction_uses_explicit_signer_public_key_from_near_cli_secure",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
+    let (service2, keychain_account2, public_key2, _) = match write_near_cli_secure_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-explicit-key-seed-2",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = keychain_delete_generic(&service1, &keychain_account1);
+            if maybe_skip_keychain_test(
+                "sign_transaction_uses_explicit_signer_public_key_from_near_cli_secure",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
 
     let state = Arc::new(BrokerState::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -606,6 +858,11 @@ fn sign_transaction_uses_explicit_signer_public_key_from_near_cli_secure() {
 #[cfg(target_os = "macos")]
 #[test]
 fn get_near_credential_rejects_legacy_fallback_public_key_mismatch() {
+    if maybe_skip_keychain_integration_test(
+        "get_near_credential_rejects_legacy_fallback_public_key_mismatch",
+    ) {
+        return;
+    }
     use near_crypto::KeyType;
     let account_id = unique_test_account_id();
     let legacy_account = nearxd_credential_account_legacy("testnet", &account_id);
@@ -618,8 +875,17 @@ fn get_near_credential_rejects_legacy_fallback_public_key_mismatch() {
         "private_key": secret_1.to_string(),
     });
     let encoded = serde_json::to_string(&payload).expect("encode legacy payload");
-    keychain_write_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account, &encoded)
-        .expect("write legacy credential");
+    if let Err(err) =
+        keychain_write_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account, &encoded)
+    {
+        if maybe_skip_keychain_test(
+            "get_near_credential_rejects_legacy_fallback_public_key_mismatch",
+            &err,
+        ) {
+            return;
+        }
+        panic!("{err}");
+    }
 
     let state = Arc::new(BrokerState::default());
     let expected_public_key = secret_2.public_key().to_string();
@@ -654,7 +920,372 @@ fn get_near_credential_rejects_legacy_fallback_public_key_mismatch() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn list_near_signing_keys_reports_legacy_nearxd_keychain_source_and_backfills_scoped_copy() {
+    if maybe_skip_keychain_integration_test(
+        "list_near_signing_keys_reports_legacy_nearxd_keychain_source_and_backfills_scoped_copy",
+    ) {
+        return;
+    }
+    let home = mktemp_dir("nearxd-legacy-keychain-list");
+    let credentials_home = home.join(".near-credentials");
+    let network_dir = credentials_home.join("testnet");
+    fs::create_dir_all(&network_dir).expect("create credentials dir");
+
+    let account_id = unique_test_account_id();
+    let (legacy_account, public_key, private_key, _) = match write_legacy_nearxd_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-legacy-keychain-list-seed",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&home);
+            if maybe_skip_keychain_test(
+                "list_near_signing_keys_reports_legacy_nearxd_keychain_source_and_backfills_scoped_copy",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
+    fs::write(
+        network_dir.join(format!("{account_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "account_id": account_id,
+            "public_key": public_key,
+            "private_key": private_key,
+        }))
+        .expect("encode legacy credential file"),
+    )
+    .expect("write legacy credential file");
+
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc_server(mock_view_access_key_list_response(&public_key));
+    let scoped_account = nearxd_credential_account_key("testnet", &account_id, &public_key);
+    let state = Arc::new(BrokerState::default());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_env_var("NEAR_NODE_URL", Some(rpc_url.as_str()), || {
+            let resp = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("legacy-list".to_string()),
+                    method: "list_near_signing_keys".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "credentials_home_dir": credentials_home.display().to_string(),
+                        "account_id": account_id,
+                    }),
+                },
+            );
+            assert!(resp.ok);
+            let row = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("keys"))
+                .and_then(Value::as_array)
+                .and_then(|keys| {
+                    keys.iter().find(|entry| {
+                        entry
+                            .get("public_key")
+                            .and_then(Value::as_str)
+                            .map(|value| value == public_key)
+                            .unwrap_or(false)
+                    })
+                })
+                .expect("expected signing key row");
+            let available_sources = row
+                .get("available_sources")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                available_sources,
+                vec![json!(SOURCE_NEARXD_KEYCHAIN), json!(SOURCE_LEGACY_FILE)]
+            );
+            assert_eq!(
+                row.get("preferred_source").and_then(Value::as_str),
+                Some(SOURCE_NEARXD_KEYCHAIN)
+            );
+            assert_eq!(
+                row.get("in_nearxd_keychain").and_then(Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                row.get("nearxd_keychain_protection").and_then(Value::as_str),
+                Some("unknown")
+            );
+            assert_eq!(
+                row.get("nearxd_keychain_import_required")
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
+            assert!(keychain_has_generic(
+                KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
+                &scoped_account
+            ));
+        });
+    }));
+
+    let _ = keychain_delete_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account);
+    let _ = keychain_delete_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped_account);
+    let _ = fs::remove_dir_all(&home);
+    let _ = rpc_handle.join();
+    if let Err(err) = result {
+        std::panic::resume_unwind(err);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_source() {
+    if maybe_skip_keychain_integration_test(
+        "sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_source",
+    ) {
+        return;
+    }
+
+    let account_id = unique_test_account_id();
+    let (legacy_account, public_key, _private_key, _) = match write_legacy_nearxd_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-keychain-import-required-sign-seed",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            if maybe_skip_keychain_test(
+                "sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_source",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
+
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc_server(mock_view_access_key_list_response(&public_key));
+    let scoped_account = nearxd_credential_account_key("testnet", &account_id, &public_key);
+    let state = Arc::new(BrokerState::default());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_env_var("NEAR_NODE_URL", Some(rpc_url.as_str()), || {
+            let resp = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("x".to_string()),
+                    method: "sign_transaction".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "signer_id": account_id,
+                        "signer_public_key": public_key,
+                        "credential_source": SOURCE_NEARXD_KEYCHAIN,
+                        "receiver_id": "receiver.testnet",
+                        "nonce": 2u64,
+                        "block_hash": "11111111111111111111111111111111",
+                        "actions": [
+                            {
+                                "type": "Transfer",
+                                "deposit": "1",
+                            }
+                        ],
+                    }),
+                },
+            );
+            assert!(!resp.ok);
+            assert_eq!(
+                resp.error.as_ref().map(|e| e.code),
+                Some("ERR_IMPORT_REQUIRED")
+            );
+        });
+    }));
+
+    let _ = keychain_delete_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account);
+    let _ = keychain_delete_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped_account);
+    let _ = rpc_handle.join();
+    if let Err(err) = result {
+        std::panic::resume_unwind(err);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn list_near_signing_accounts_includes_legacy_nearxd_keychain_only_account() {
+    if maybe_skip_keychain_integration_test(
+        "list_near_signing_accounts_includes_legacy_nearxd_keychain_only_account",
+    ) {
+        return;
+    }
+    let home = mktemp_dir("nearxd-legacy-keychain-account-discovery");
+    let credentials_home = home.join(".near-credentials");
+    fs::create_dir_all(&credentials_home).expect("create credentials home");
+
+    let account_id = unique_test_account_id();
+    let (legacy_account, public_key, _, _) = match write_legacy_nearxd_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-legacy-keychain-account-discovery-seed",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&home);
+            if maybe_skip_keychain_test(
+                "list_near_signing_accounts_includes_legacy_nearxd_keychain_only_account",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
+
+    let discovered = discover_signing_accounts("testnet", &credentials_home, None);
+    let sources = discovered
+        .get(&account_id)
+        .cloned()
+        .expect("expected discovered account");
+    assert!(sources.contains(SOURCE_NEARXD_KEYCHAIN));
+
+    let state = Arc::new(BrokerState::default());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let resp = handle_request(
+            &state,
+            BrokerRequest {
+                id: Some("legacy-account-list".to_string()),
+                method: "list_near_signing_accounts".to_string(),
+                params: json!({
+                    "network": "testnet",
+                    "credentials_home_dir": credentials_home.display().to_string(),
+                }),
+            },
+        );
+        assert!(resp.ok);
+        let row = resp
+            .result
+            .as_ref()
+            .and_then(|v| v.get("accounts"))
+            .and_then(Value::as_array)
+            .and_then(|accounts| {
+                accounts.iter().find(|entry| {
+                    entry
+                        .get("account_id")
+                        .and_then(Value::as_str)
+                        .map(|value| value == account_id)
+                        .unwrap_or(false)
+                })
+            })
+            .expect("expected signing account row");
+        let source_hints = row
+            .get("source_hints")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(source_hints
+            .iter()
+            .any(|value| value.as_str() == Some(SOURCE_NEARXD_KEYCHAIN)));
+        assert_eq!(row.get("has_keys").and_then(Value::as_bool), Some(true));
+    }));
+
+    let _ = keychain_delete_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account);
+    let _ = keychain_delete_generic(
+        KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
+        &nearxd_credential_account_key("testnet", &account_id, &public_key),
+    );
+    let _ = fs::remove_dir_all(&home);
+    if let Err(err) = result {
+        std::panic::resume_unwind(err);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn build_signing_keys_does_not_attach_mismatched_legacy_nearxd_keychain_source() {
+    if maybe_skip_keychain_integration_test(
+        "build_signing_keys_does_not_attach_mismatched_legacy_nearxd_keychain_source",
+    ) {
+        return;
+    }
+    let home = mktemp_dir("nearxd-legacy-keychain-mismatch");
+    let credentials_home = home.join(".near-credentials");
+    fs::create_dir_all(&credentials_home).expect("create credentials home");
+
+    let account_id = unique_test_account_id();
+    let (legacy_account, mismatched_public_key, _, _) = match write_legacy_nearxd_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-legacy-keychain-mismatch-seed-a",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&home);
+            if maybe_skip_keychain_test(
+                "build_signing_keys_does_not_attach_mismatched_legacy_nearxd_keychain_source",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
+    let other_public_key = SecretKey::from_seed(
+        near_crypto::KeyType::ED25519,
+        "nearx-legacy-keychain-mismatch-seed-b",
+    )
+    .public_key()
+    .to_string();
+
+    let settings = json!({
+        SIGNING_KEY_INDEX_KEY: {
+            "version": SIGNING_KEY_INDEX_VERSION,
+            "records": [{
+                "network": "testnet",
+                "account_id": account_id,
+                "public_key": other_public_key,
+                "available_sources": [SOURCE_NEARXD_KEYCHAIN],
+                "in_nearxd_keychain": true,
+                "last_seen_at_ms": now_ms(),
+            }],
+        },
+    });
+
+    let keys = with_env_var("NEAR_NODE_URL", Some("http://127.0.0.1:1"), || {
+        build_signing_keys(
+            "testnet",
+            Some(&account_id),
+            &credentials_home,
+            Some(&settings),
+        )
+    });
+    let row = keys
+        .iter()
+        .find(|entry| entry.public_key == other_public_key)
+        .expect("expected indexed signing key");
+    assert!(!row.available_sources.contains(SOURCE_NEARXD_KEYCHAIN));
+    assert!(!row.in_nearxd_keychain);
+    assert!(!keychain_has_generic(
+        KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
+        &nearxd_credential_account_key("testnet", &account_id, &other_public_key),
+    ));
+
+    let _ = keychain_delete_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account);
+    let _ = keychain_delete_generic(
+        KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
+        &nearxd_credential_account_key("testnet", &account_id, &mismatched_public_key),
+    );
+    let _ = keychain_delete_generic(
+        KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
+        &nearxd_credential_account_key("testnet", &account_id, &other_public_key),
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn list_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable() {
+    if maybe_skip_keychain_integration_test(
+        "list_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable",
+    ) {
+        return;
+    }
     let account_id = unique_test_account_id();
     let home = mktemp_dir("nearxd-near-cli-fallback-list");
     fs::write(
@@ -666,8 +1297,23 @@ fn list_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable() {
         .expect("encode accounts.json"),
     )
     .expect("write accounts.json");
-    let (service, keychain_account, public_key, _) =
-        write_near_cli_secure_test_credential("testnet", &account_id, "nearx-fallback-list-seed");
+    let (service, keychain_account, public_key, _) = match write_near_cli_secure_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-fallback-list-seed",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&home);
+            if maybe_skip_keychain_test(
+                "list_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
 
     let state = Arc::new(BrokerState::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -728,6 +1374,11 @@ fn list_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable() {
 #[cfg(target_os = "macos")]
 #[test]
 fn import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable() {
+    if maybe_skip_keychain_integration_test(
+        "import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable",
+    ) {
+        return;
+    }
     let account_id = unique_test_account_id();
     let home = mktemp_dir("nearxd-near-cli-fallback-import");
     fs::write(
@@ -739,8 +1390,23 @@ fn import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable()
         .expect("encode accounts.json"),
     )
     .expect("write accounts.json");
-    let (service, keychain_account, public_key, _) =
-        write_near_cli_secure_test_credential("testnet", &account_id, "nearx-fallback-import-seed");
+    let (service, keychain_account, public_key, _) = match write_near_cli_secure_test_credential(
+        "testnet",
+        &account_id,
+        "nearx-fallback-import-seed",
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&home);
+            if maybe_skip_keychain_test(
+                "import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable",
+                &err,
+            ) {
+                return;
+            }
+            panic!("{err}");
+        }
+    };
 
     let state = Arc::new(BrokerState::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -790,6 +1456,17 @@ fn import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable()
                     .and_then(Value::as_str),
                 Some(SOURCE_NEAR_CLI_SECURE)
             );
+            assert!(resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("storage_backend"))
+                .and_then(Value::as_str)
+                .is_some());
+            assert!(imported
+                .first()
+                .and_then(|v| v.get("storage_backend"))
+                .and_then(Value::as_str)
+                .is_some());
         });
     }));
 
@@ -802,154 +1479,260 @@ fn import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable()
 
 #[test]
 fn staking_watchlist_crud_persists_and_survives_reload() {
+    #[cfg(target_os = "macos")]
+    {
+        if keychain_read_generic(
+            KEYCHAIN_SIGNING_SETTINGS_SERVICE,
+            KEYCHAIN_SIGNING_SETTINGS_ACCOUNT,
+        )
+        .is_some()
+            && !keychain_tests_enabled()
+        {
+            eprintln!(
+                "[nearxd:test-skip] staking_watchlist_crud_persists_and_survives_reload: keychain signing settings present; set NEARXD_RUN_KEYCHAIN_TESTS=1 to run this integration assertion"
+            );
+            return;
+        }
+    }
+
     let home = mktemp_dir("nearxd-staking-watchlist");
     let home_str = home.display().to_string();
     let account_a = unique_test_account_id();
-    let account_b = unique_test_account_id();
+    let ledger_path = "44'/397'/0'/0'/100'";
+    let ledger_public_key = mock_ledger_get_public_key(ledger_path).to_string();
+    let account_b = implicit_account_id_from_public_key(&mock_ledger_get_public_key(ledger_path));
 
-    with_env_vars(&[("HOME", Some(home_str.as_str()))], || {
-        let state = Arc::new(BrokerState::default());
+    with_env_vars(
+        &[
+            ("HOME", Some(home_str.as_str())),
+            ("NEAR_NODE_URL", Some("http://127.0.0.1:1")),
+        ],
+        || {
+            let state = Arc::new(BrokerState::default());
 
-        let initial = handle_request(
-            &state,
-            BrokerRequest {
-                id: Some("1".to_string()),
-                method: "list_staking_watchlist".to_string(),
-                params: json!({
-                    "network": "testnet",
-                }),
-            },
-        );
-        assert!(initial.ok);
-        assert_eq!(
-            initial
+            let initial = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("1".to_string()),
+                    method: "list_staking_watchlist".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                    }),
+                },
+            );
+            assert!(initial.ok);
+            assert_eq!(
+                initial
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("entries"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(0)
+            );
+
+            let add_a = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("2".to_string()),
+                    method: "add_staking_watchlist_account".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "account_id": account_a,
+                        "source": "manual",
+                        "prefer_keychain": false,
+                    }),
+                },
+            );
+            assert!(add_a.ok);
+
+            let add_b = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("3".to_string()),
+                    method: "add_staking_watchlist_account".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "account_id": account_b,
+                        "source": "hardware_wallet",
+                        "wallet_type": "ledger",
+                        "public_key": ledger_public_key,
+                        "derivation_path": ledger_path,
+                        "prefer_keychain": false,
+                    }),
+                },
+            );
+            assert!(add_b.ok);
+
+            // Simulate a fresh broker process by instantiating a new in-memory state.
+            let state_reloaded = Arc::new(BrokerState::default());
+            let after_reload = handle_request(
+                &state_reloaded,
+                BrokerRequest {
+                    id: Some("4".to_string()),
+                    method: "list_staking_watchlist".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                    }),
+                },
+            );
+            assert!(after_reload.ok);
+            let entries = after_reload
                 .result
                 .as_ref()
                 .and_then(|v| v.get("entries"))
                 .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(0)
-        );
+                .cloned()
+                .unwrap_or_default();
+            assert!(entries.iter().any(|v| {
+                v.get("account_id")
+                    .and_then(Value::as_str)
+                    .map(|s| s == account_a)
+                    .unwrap_or(false)
+            }));
+            assert!(entries.iter().any(|v| {
+                v.get("account_id")
+                    .and_then(Value::as_str)
+                    .map(|s| s == account_b)
+                    .unwrap_or(false)
+            }));
+            let hardware_entry = entries.iter().find(|v| {
+                v.get("account_id")
+                    .and_then(Value::as_str)
+                    .map(|s| s == account_b)
+                    .unwrap_or(false)
+            });
+            assert_eq!(
+                hardware_entry
+                    .and_then(|v| v.get("source"))
+                    .and_then(Value::as_str),
+                Some("hardware_wallet")
+            );
+            assert_eq!(
+                hardware_entry
+                    .and_then(|v| v.get("hardware_wallet"))
+                    .and_then(|v| v.get("derivation_path"))
+                    .and_then(Value::as_str),
+                Some(ledger_path)
+            );
+            assert_eq!(
+                hardware_entry
+                    .and_then(|v| v.get("hardware_wallet"))
+                    .and_then(|v| v.get("public_key"))
+                    .and_then(Value::as_str),
+                Some(ledger_public_key.as_str())
+            );
 
-        let add_a = handle_request(
-            &state,
-            BrokerRequest {
-                id: Some("2".to_string()),
-                method: "add_staking_watchlist_account".to_string(),
-                params: json!({
-                    "network": "testnet",
-                    "account_id": account_a,
-                    "source": "manual",
-                    "prefer_keychain": false,
-                }),
-            },
-        );
-        assert!(add_a.ok);
+            let removed = handle_request(
+                &state_reloaded,
+                BrokerRequest {
+                    id: Some("5".to_string()),
+                    method: "remove_staking_watchlist_account".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "account_id": account_a,
+                        "prefer_keychain": false,
+                    }),
+                },
+            );
+            assert!(removed.ok);
+            assert_eq!(
+                removed
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("removed"))
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
 
-        let add_b = handle_request(
-            &state,
-            BrokerRequest {
-                id: Some("3".to_string()),
-                method: "add_staking_watchlist_account".to_string(),
-                params: json!({
-                    "network": "testnet",
-                    "account_id": account_b,
-                    "source": "seeded",
-                    "prefer_keychain": false,
-                }),
-            },
-        );
-        assert!(add_b.ok);
-
-        // Simulate a fresh broker process by instantiating a new in-memory state.
-        let state_reloaded = Arc::new(BrokerState::default());
-        let after_reload = handle_request(
-            &state_reloaded,
-            BrokerRequest {
-                id: Some("4".to_string()),
-                method: "list_staking_watchlist".to_string(),
-                params: json!({
-                    "network": "testnet",
-                }),
-            },
-        );
-        assert!(after_reload.ok);
-        let entries = after_reload
-            .result
-            .as_ref()
-            .and_then(|v| v.get("entries"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        assert!(entries.iter().any(|v| {
-            v.get("account_id")
-                .and_then(Value::as_str)
-                .map(|s| s == account_a)
-                .unwrap_or(false)
-        }));
-        assert!(entries.iter().any(|v| {
-            v.get("account_id")
-                .and_then(Value::as_str)
-                .map(|s| s == account_b)
-                .unwrap_or(false)
-        }));
-
-        let removed = handle_request(
-            &state_reloaded,
-            BrokerRequest {
-                id: Some("5".to_string()),
-                method: "remove_staking_watchlist_account".to_string(),
-                params: json!({
-                    "network": "testnet",
-                    "account_id": account_a,
-                    "prefer_keychain": false,
-                }),
-            },
-        );
-        assert!(removed.ok);
-        assert_eq!(
-            removed
+            let state_final = Arc::new(BrokerState::default());
+            let final_list = handle_request(
+                &state_final,
+                BrokerRequest {
+                    id: Some("6".to_string()),
+                    method: "list_staking_watchlist".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                    }),
+                },
+            );
+            assert!(final_list.ok);
+            let final_entries = final_list
                 .result
                 .as_ref()
-                .and_then(|v| v.get("removed"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-
-        let state_final = Arc::new(BrokerState::default());
-        let final_list = handle_request(
-            &state_final,
-            BrokerRequest {
-                id: Some("6".to_string()),
-                method: "list_staking_watchlist".to_string(),
-                params: json!({
-                    "network": "testnet",
-                }),
-            },
-        );
-        assert!(final_list.ok);
-        let final_entries = final_list
-            .result
-            .as_ref()
-            .and_then(|v| v.get("entries"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        assert!(!final_entries.iter().any(|v| {
-            v.get("account_id")
-                .and_then(Value::as_str)
-                .map(|s| s == account_a)
-                .unwrap_or(false)
-        }));
-        assert!(final_entries.iter().any(|v| {
-            v.get("account_id")
-                .and_then(Value::as_str)
-                .map(|s| s == account_b)
-                .unwrap_or(false)
-        }));
-    });
+                .and_then(|v| v.get("entries"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            assert!(!final_entries.iter().any(|v| {
+                v.get("account_id")
+                    .and_then(Value::as_str)
+                    .map(|s| s == account_a)
+                    .unwrap_or(false)
+            }));
+            assert!(final_entries.iter().any(|v| {
+                v.get("account_id")
+                    .and_then(Value::as_str)
+                    .map(|s| s == account_b)
+                    .unwrap_or(false)
+            }));
+        },
+    );
 
     let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn staking_watchlist_keeps_hardware_wallet_metadata_from_settings_json() {
+    let derivation_path = "44'/397'/0'/0'/100'";
+    let public_key = mock_ledger_get_public_key(derivation_path);
+    let public_key_str = public_key.to_string();
+    let account_id = implicit_account_id_from_public_key(&public_key);
+    let settings = json!({
+        STAKING_WATCHLIST_KEY: {
+            "version": 1,
+            "entries": [
+                {
+                    "network": "testnet",
+                    "account_id": account_id,
+                    "added_at_ms": 123,
+                    "source": "hardware_wallet",
+                    "hardware_wallet": {
+                        "wallet_type": "ledger",
+                        "public_key": public_key_str.clone(),
+                        "derivation_path": derivation_path,
+                    }
+                }
+            ]
+        }
+    });
+
+    let entries = staking_watchlist_for_network(&settings, "testnet");
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry.account_id, account_id);
+    assert_eq!(entry.source, "hardware_wallet");
+    assert_eq!(
+        entry
+            .hardware_wallet
+            .as_ref()
+            .map(|record| record.wallet_type.as_str()),
+        Some("ledger")
+    );
+    assert_eq!(
+        entry
+            .hardware_wallet
+            .as_ref()
+            .map(|record| record.derivation_path.as_str()),
+        Some(derivation_path)
+    );
+    assert_eq!(
+        entry
+            .hardware_wallet
+            .as_ref()
+            .map(|record| record.public_key.as_str()),
+        Some(public_key_str.as_str())
+    );
 }
 
 #[test]
@@ -970,6 +1753,298 @@ fn add_staking_watchlist_account_rejects_invalid_account_id() {
 
     assert!(!resp.ok);
     assert_eq!(resp.error.as_ref().map(|e| e.code), Some("ERR_PARAMS"));
+}
+
+#[test]
+fn get_signing_capabilities_reports_transport_and_secure_store_backend() {
+    let state = Arc::new(BrokerState::default());
+    let resp = handle_request(
+        &state,
+        BrokerRequest {
+            id: Some("x".to_string()),
+            method: "get_signing_capabilities".to_string(),
+            params: json!({}),
+        },
+    );
+
+    assert!(resp.ok);
+    let result = resp.result.as_ref().expect("capabilities result");
+    assert!(result.get("platform").and_then(Value::as_str).is_some());
+    assert!(result
+        .get("secure_store_backend")
+        .and_then(Value::as_str)
+        .is_some());
+    assert!(result
+        .get("supports_secure_store_persistence")
+        .and_then(Value::as_bool)
+        .is_some());
+    #[cfg(windows)]
+    assert_eq!(
+        result.get("transport").and_then(Value::as_str),
+        Some("named_pipe")
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        result.get("transport").and_then(Value::as_str),
+        Some("unix_socket")
+    );
+}
+
+#[test]
+fn list_near_signing_accounts_counts_near_cli_secure_source_as_has_keys() {
+    let home = mktemp_dir("nearxd-signing-accounts-near-cli");
+    let account_id = unique_test_account_id();
+    fs::write(
+        home.join("accounts.json"),
+        serde_json::to_string(&vec![json!({
+            "account_id": account_id,
+            "used_as_signer": true,
+        })])
+        .expect("encode accounts.json"),
+    )
+    .expect("write accounts.json");
+
+    let state = Arc::new(BrokerState::default());
+    let resp = handle_request(
+        &state,
+        BrokerRequest {
+            id: Some("x".to_string()),
+            method: "list_near_signing_accounts".to_string(),
+            params: json!({
+                "network": "testnet",
+                "credentials_home_dir": home.display().to_string(),
+            }),
+        },
+    );
+
+    assert!(resp.ok);
+    let accounts = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("accounts"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let row = accounts
+        .iter()
+        .find(|entry| {
+            entry
+                .get("account_id")
+                .and_then(Value::as_str)
+                .map(|value| value == account_id)
+                .unwrap_or(false)
+        })
+        .expect("expected near-cli account");
+    assert_eq!(row.get("has_keys").and_then(Value::as_bool), Some(true));
+    assert!(row
+        .get("source_hints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| value.as_str() == Some(SOURCE_NEAR_CLI_SECURE)));
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn signing_key_label_round_trips_and_survives_import_updates() {
+    let home = mktemp_dir("nearxd-signing-label");
+    let home_str = home.display().to_string();
+    let credentials_home = home.join(".near-credentials");
+    let network_dir = credentials_home.join("testnet");
+    fs::create_dir_all(&network_dir).expect("create credentials dir");
+
+    let account_id = unique_test_account_id();
+    let secret = SecretKey::from_seed(near_crypto::KeyType::ED25519, "nearx-signing-label-seed");
+    let public_key = secret.public_key().to_string();
+    fs::write(
+        network_dir.join(format!("{account_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "account_id": account_id,
+            "public_key": public_key,
+            "private_key": secret.to_string(),
+        }))
+        .expect("encode legacy credential"),
+    )
+    .expect("write legacy credential");
+
+    with_env_vars(
+        &[
+            ("HOME", Some(home_str.as_str())),
+            ("NEAR_NODE_URL", Some("http://127.0.0.1:1")),
+        ],
+        || {
+            let state = Arc::new(BrokerState::default());
+
+            let set_label = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("1".to_string()),
+                    method: "set_signing_key_label".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "account_id": account_id,
+                        "public_key": public_key,
+                        "label": "Demo legacy",
+                        "prefer_keychain": false,
+                    }),
+                },
+            );
+            assert!(set_label.ok);
+            assert_eq!(
+                set_label
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("label"))
+                    .and_then(Value::as_str),
+                Some("Demo legacy")
+            );
+
+            let import = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("2".to_string()),
+                    method: "import_near_signing_keys".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "credentials_home_dir": credentials_home.display().to_string(),
+                        "account_id": account_id,
+                        "public_key": public_key,
+                        "sources": ["legacy_file"],
+                        "persist_in_keychain": false,
+                        "save_settings": true,
+                    }),
+                },
+            );
+            assert!(
+                import.ok,
+                "expected import to succeed, got error: {:?}",
+                import.error
+            );
+
+            let list = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("3".to_string()),
+                    method: "list_near_signing_keys".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "credentials_home_dir": credentials_home.display().to_string(),
+                        "account_id": account_id,
+                    }),
+                },
+            );
+            assert!(list.ok);
+
+            let keys = list
+                .result
+                .as_ref()
+                .and_then(|v| v.get("keys"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let row = keys
+                .iter()
+                .find(|entry| {
+                    entry
+                        .get("public_key")
+                        .and_then(Value::as_str)
+                        .map(|value| value == public_key)
+                        .unwrap_or(false)
+                })
+                .expect("expected labeled signing key");
+            assert_eq!(
+                row.get("label").and_then(Value::as_str),
+                Some("Demo legacy")
+            );
+
+            let settings_path = home.join(".nearx").join("signing_settings.json");
+            let settings_raw = fs::read_to_string(settings_path).expect("read saved settings");
+            let settings: Value =
+                serde_json::from_str(&settings_raw).expect("parse saved settings");
+            let records = settings
+                .get(SIGNING_KEY_INDEX_KEY)
+                .and_then(|v| v.get("records"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let indexed = records
+                .iter()
+                .find(|entry| {
+                    entry
+                        .get("public_key")
+                        .and_then(Value::as_str)
+                        .map(|value| value == public_key)
+                        .unwrap_or(false)
+                })
+                .expect("expected indexed signing key");
+            assert_eq!(
+                indexed.get("label").and_then(Value::as_str),
+                Some("Demo legacy")
+            );
+        },
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn build_signing_keys_does_not_report_deleted_keychain_source_from_index() {
+    let home = mktemp_dir("nearxd-deleted-keychain-source");
+    let credentials_home = home.join(".near-credentials");
+    let network_dir = credentials_home.join("testnet");
+    fs::create_dir_all(&network_dir).expect("create credentials dir");
+
+    let account_id = unique_test_account_id();
+    let secret = SecretKey::from_seed(
+        near_crypto::KeyType::ED25519,
+        "nearx-deleted-keychain-source",
+    );
+    let public_key = secret.public_key().to_string();
+    fs::write(
+        network_dir.join(format!("{account_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "account_id": account_id,
+            "public_key": public_key,
+            "private_key": secret.to_string(),
+        }))
+        .expect("encode legacy credential"),
+    )
+    .expect("write legacy credential");
+
+    let settings = json!({
+        SIGNING_KEY_INDEX_KEY: {
+            "version": SIGNING_KEY_INDEX_VERSION,
+            "records": [{
+                "network": "testnet",
+                "account_id": account_id,
+                "public_key": public_key,
+                "label": "Deleted keychain copy",
+                "available_sources": [SOURCE_NEARXD_KEYCHAIN, SOURCE_LEGACY_FILE],
+                "in_nearxd_keychain": true,
+                "last_seen_at_ms": now_ms(),
+            }],
+        },
+    });
+
+    with_env_var("NEAR_NODE_URL", Some("http://127.0.0.1:1"), || {
+        let keys = build_signing_keys(
+            "testnet",
+            Some(&account_id),
+            &credentials_home,
+            Some(&settings),
+        );
+        let row = keys
+            .iter()
+            .find(|entry| entry.public_key == public_key)
+            .expect("expected signing key");
+        assert_eq!(row.label.as_deref(), Some("Deleted keychain copy"));
+        assert!(row.available_sources.contains(SOURCE_LEGACY_FILE));
+        assert!(!row.available_sources.contains(SOURCE_NEARXD_KEYCHAIN));
+        assert!(!row.in_nearxd_keychain);
+    });
+
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
@@ -1011,6 +2086,14 @@ fn connect_hardware_wallet_and_sign_transaction_with_mock_adapter() {
                 connect
                     .result
                     .as_ref()
+                    .and_then(|v| v.get("account_binding"))
+                    .and_then(Value::as_str),
+                Some("selected_account")
+            );
+            assert_eq!(
+                connect
+                    .result
+                    .as_ref()
                     .and_then(|v| v.get("public_key"))
                     .and_then(Value::as_str),
                 Some(public_key.as_str())
@@ -1025,6 +2108,12 @@ fn connect_hardware_wallet_and_sign_transaction_with_mock_adapter() {
             assert!(sources
                 .iter()
                 .any(|s| s.as_str() == Some(SOURCE_HARDWARE_WALLET)));
+            assert!(connect
+                .result
+                .as_ref()
+                .and_then(|v| v.get("storage_backend"))
+                .and_then(Value::as_str)
+                .is_some());
 
             let sign = handle_request(
                 &state,
@@ -1063,6 +2152,182 @@ fn connect_hardware_wallet_and_sign_transaction_with_mock_adapter() {
     );
 
     let _ = rpc_handle.join();
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn connect_hardware_wallet_without_account_uses_implicit_account() {
+    let home = mktemp_dir("nearxd-hardware-connect-implicit");
+    let home_str = home.display().to_string();
+    let derivation_path = "44'/397'/0'/0'/100'".to_string();
+    let public_key = mock_ledger_get_public_key(&derivation_path);
+    let public_key_str = public_key.to_string();
+    let implicit_account_id = implicit_account_id_from_public_key(&public_key);
+
+    with_env_vars(
+        &[
+            ("HOME", Some(home_str.as_str())),
+            ("NEARXD_HARDWARE_WALLET_ADAPTER", Some("mock")),
+            ("NEAR_NODE_URL", Some("http://127.0.0.1:1")),
+        ],
+        || {
+            let state = Arc::new(BrokerState::default());
+            let connect = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("implicit-1".to_string()),
+                    method: "connect_hardware_wallet".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "wallet_type": "ledger",
+                        "derivation_path": derivation_path,
+                        "display_confirm": false,
+                        "prefer_keychain": false,
+                        "credentials_home_dir": home_str,
+                    }),
+                },
+            );
+            assert!(connect.ok);
+            assert_eq!(
+                connect
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("account_binding"))
+                    .and_then(Value::as_str),
+                Some("implicit_account")
+            );
+            assert_eq!(
+                connect
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("requested_account_id"))
+                    .and_then(Value::as_str),
+                None
+            );
+            assert_eq!(
+                connect
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("implicit_account_id"))
+                    .and_then(Value::as_str),
+                Some(implicit_account_id.as_str())
+            );
+            assert_eq!(
+                connect
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("account_id"))
+                    .and_then(Value::as_str),
+                Some(implicit_account_id.as_str())
+            );
+            assert_eq!(
+                connect
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get("public_key"))
+                    .and_then(Value::as_str),
+                Some(public_key_str.as_str())
+            );
+
+            let accounts = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("implicit-list-accounts".to_string()),
+                    method: "list_near_signing_accounts".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "credentials_home_dir": home_str,
+                    }),
+                },
+            );
+            assert!(accounts.ok);
+            let listed_account = accounts
+                .result
+                .as_ref()
+                .and_then(|v| v.get("accounts"))
+                .and_then(Value::as_array)
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry
+                            .get("account_id")
+                            .and_then(Value::as_str)
+                            .map(|value| value == implicit_account_id)
+                            .unwrap_or(false)
+                    })
+                });
+            assert_eq!(
+                listed_account
+                    .and_then(|v| v.get("hardware_wallets"))
+                    .and_then(Value::as_array)
+                    .and_then(|entries| entries.first())
+                    .and_then(|v| v.get("derivation_path"))
+                    .and_then(Value::as_str),
+                Some(derivation_path.as_str())
+            );
+
+            let keys = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("implicit-list-keys".to_string()),
+                    method: "list_near_signing_keys".to_string(),
+                    params: json!({
+                        "network": "testnet",
+                        "account_id": implicit_account_id,
+                        "credentials_home_dir": home_str,
+                    }),
+                },
+            );
+            assert!(keys.ok);
+            let listed_key = keys
+                .result
+                .as_ref()
+                .and_then(|v| v.get("keys"))
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first());
+            assert_eq!(
+                listed_key
+                    .and_then(|v| v.get("hardware_wallet"))
+                    .and_then(|v| v.get("derivation_path"))
+                    .and_then(Value::as_str),
+                Some(derivation_path.as_str())
+            );
+            assert_eq!(
+                listed_key
+                    .and_then(|v| v.get("hardware_wallet"))
+                    .and_then(|v| v.get("public_key"))
+                    .and_then(Value::as_str),
+                Some(public_key_str.as_str())
+            );
+
+            let sign = handle_request(
+                &state,
+                BrokerRequest {
+                    id: Some("implicit-2".to_string()),
+                    method: "sign_transaction".to_string(),
+                    params: json!({
+                        "signer_id": implicit_account_id,
+                        "signer_public_key": public_key_str,
+                        "credential_source": SOURCE_HARDWARE_WALLET,
+                        "receiver_id": "receiver.testnet",
+                        "nonce": 7,
+                        "block_hash": "11111111111111111111111111111111",
+                        "actions": [{ "type": "Transfer", "deposit": "1" }],
+                        "network": "testnet",
+                        "reason": "test implicit hardware wallet sign path",
+                    }),
+                },
+            );
+            assert!(sign.ok);
+            assert_eq!(
+                sign.result
+                    .as_ref()
+                    .and_then(|v| v.get("credential_source"))
+                    .and_then(Value::as_str),
+                Some(SOURCE_HARDWARE_WALLET)
+            );
+        },
+    );
+
     let _ = fs::remove_dir_all(home);
 }
 
@@ -1223,15 +2488,31 @@ fn signing_key_index_marks_stale_and_prunes_very_old_records() {
 #[cfg(target_os = "macos")]
 #[test]
 fn sign_transaction_supports_secp256k1_function_call_fixture() {
+    if maybe_skip_keychain_integration_test(
+        "sign_transaction_supports_secp256k1_function_call_fixture",
+    ) {
+        return;
+    }
     use borsh::BorshDeserialize;
     let account_id = unique_test_account_id();
     let (service, keychain_account, public_key, _) =
-        write_near_cli_secure_test_credential_with_key_type(
+        match write_near_cli_secure_test_credential_with_key_type(
             "testnet",
             &account_id,
             near_crypto::KeyType::SECP256K1,
             "nearx-secp-function-call-seed",
-        );
+        ) {
+            Ok(v) => v,
+            Err(err) => {
+                if maybe_skip_keychain_test(
+                    "sign_transaction_supports_secp256k1_function_call_fixture",
+                    &err,
+                ) {
+                    return;
+                }
+                panic!("{err}");
+            }
+        };
 
     let state = Arc::new(BrokerState::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
+use nearx_broker_ipc::BrokerEndpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
 use std::process::Command;
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -84,24 +84,15 @@ fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn nearxd_socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var("NEARXD_SOCKET_PATH") {
-        let p = PathBuf::from(path.trim());
-        if !p.as_os_str().is_empty() {
-            return p;
-        }
-    }
-    std::env::temp_dir().join("nearxd.sock")
+fn nearxd_endpoint() -> BrokerEndpoint {
+    BrokerEndpoint::from_env()
 }
 
-#[cfg(unix)]
 fn nearxd_request(method: &str, params: Value) -> Result<Value> {
-    use std::os::unix::net::UnixStream;
-
-    let socket_path = nearxd_socket_path();
-    let mut stream = UnixStream::connect(&socket_path)
-        .with_context(|| format!("connect nearxd socket at {}", socket_path.display()))?;
+    let endpoint = nearxd_endpoint();
+    let mut stream = endpoint
+        .connect()
+        .with_context(|| format!("connect nearxd socket at {}", endpoint.display()))?;
 
     let req = json!({
         "id": "native-host",
@@ -142,14 +133,8 @@ fn nearxd_request(method: &str, params: Value) -> Result<Value> {
     anyhow::bail!(err.to_string())
 }
 
-#[cfg(unix)]
 fn open_url_via_nearxd(url: &str) -> Result<()> {
     nearxd_request("open_deep_link", json!({ "url": url })).map(|_| ())
-}
-
-#[cfg(not(unix))]
-fn open_url_via_nearxd(_url: &str) -> Result<()> {
-    anyhow::bail!("nearxd broker path is not available on this platform")
 }
 
 fn open_url_broker_first(url: &str) -> Result<()> {

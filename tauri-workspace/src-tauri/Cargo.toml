@@ -20,6 +20,7 @@ log = { workspace = true }
 env_logger = "0.10"
 thiserror = "1"
 rand = "0.8"
+nearx-broker-ipc = { path = "../../nearx-broker-ipc" }
 
 # Deep links + single instance
 tauri-plugin-deep-link = { workspace = true }
@@ -31,6 +32,7 @@ tauri-plugin-shell = { workspace = true }
 
 # Utilities
 chrono = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Disabled: egui + ratatui stack (no longer used - Tauri serves pre-built DOM frontend)
 # egui = { version = "0.32", optional = true }

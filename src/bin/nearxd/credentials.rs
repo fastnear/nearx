@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use crate::keychain::{
     keychain_has_generic, keychain_list_generic_accounts, keychain_read_generic,
-    keychain_read_generic_with_prompt, keychain_write_generic_protected,
+    keychain_read_generic_with_prompt, keychain_write_generic_protected, secure_store_backend_name,
+    secure_store_persistence_supported, secure_store_prompt_reads_supported,
+    ProtectedWriteOutcome,
 };
 use crate::util::now_ms;
 
@@ -17,6 +19,10 @@ pub(crate) const SOURCE_NEAR_CLI_SECURE: &str = "near_cli_secure";
 pub(crate) const SOURCE_LEGACY_FILE: &str = "legacy_file";
 pub(crate) const SOURCE_HARDWARE_WALLET: &str = "hardware_wallet";
 pub(crate) const DEFAULT_KEYCHAIN_CREDENTIAL_PROTECTION: &str = "biometry_current_set";
+pub(crate) const KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET: &str = "biometry_current_set";
+pub(crate) const KEYCHAIN_PROTECTION_USER_PRESENCE: &str = "user_presence";
+pub(crate) const KEYCHAIN_PROTECTION_UNPROTECTED: &str = "unprotected";
+pub(crate) const KEYCHAIN_PROTECTION_UNKNOWN: &str = "unknown";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct NearCredentialFile {
@@ -41,6 +47,12 @@ pub(crate) struct ParsedNearCredential {
 pub(crate) struct ParsedLegacyCredential {
     pub credential: ParsedNearCredential,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredNearCredentialKeychainResult {
+    pub keychain_status: &'static str,
+    pub keychain_protection: Option<&'static str>,
 }
 
 pub(crate) fn credential_curve_type(public_key: &str) -> &'static str {
@@ -152,6 +164,88 @@ pub(crate) fn parse_near_credential_from_value(
     })
 }
 
+fn parse_stored_near_credential(
+    raw: &str,
+    fallback_account: &str,
+    source_display: &str,
+) -> Result<ParsedNearCredential, String> {
+    let parsed: NearCredentialFile = serde_json::from_str(raw)
+        .map_err(|e| format!("decode stored credential {}: {e}", source_display))?;
+    let account_id = parsed
+        .account_id
+        .unwrap_or_else(|| fallback_account.to_string())
+        .trim()
+        .to_string();
+    if account_id.is_empty() {
+        return Err(format!(
+            "missing account_id in stored credential {}",
+            source_display
+        ));
+    }
+
+    let private_key = parsed
+        .private_key
+        .or(parsed.secret_key)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if private_key.is_empty() {
+        return Err(format!(
+            "missing private_key in stored credential {}",
+            source_display
+        ));
+    }
+
+    let public_key = {
+        let explicit = parsed.public_key.unwrap_or_default().trim().to_string();
+        if !explicit.is_empty() {
+            explicit
+        } else {
+            private_key
+                .parse::<SecretKey>()
+                .map_err(|e| {
+                    format!(
+                        "derive public_key from stored credential {}: {e}",
+                        source_display
+                    )
+                })?
+                .public_key()
+                .to_string()
+        }
+    };
+
+    Ok(ParsedNearCredential {
+        account_id,
+        public_key,
+        private_key,
+    })
+}
+
+fn maybe_backfill_scoped_nearxd_keychain_credential(
+    network: &str,
+    credential: &ParsedNearCredential,
+) {
+    let scoped_account =
+        nearxd_credential_account_key(network, &credential.account_id, &credential.public_key);
+    if keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped_account) {
+        return;
+    }
+    if let Err(err) = store_near_credential_keychain(
+        network,
+        credential,
+        false,
+        DEFAULT_KEYCHAIN_CREDENTIAL_PROTECTION,
+    ) {
+        log::warn!(
+            "nearxd: failed to backfill scoped keychain credential for {}:{}:{}: {}",
+            network,
+            credential.account_id,
+            credential.public_key,
+            err
+        );
+    }
+}
+
 pub(crate) fn parse_near_credential(path: &Path) -> Result<ParsedNearCredential, String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let parsed: NearCredentialFile =
@@ -226,13 +320,89 @@ pub(crate) fn collect_legacy_credentials(
     Ok(out)
 }
 
+pub(crate) fn nearxd_keychain_accounts_for_network(network: &str) -> Vec<String> {
+    let accounts = match keychain_list_generic_accounts(KEYCHAIN_NEAR_CREDENTIAL_SERVICE) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "nearxd: failed to enumerate nearxd keychain accounts for {}: {}",
+                network,
+                e
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for account in accounts {
+        let mut parts = account.splitn(3, ':');
+        let Some(item_network) = parts.next() else {
+            continue;
+        };
+        if item_network != network {
+            continue;
+        }
+        let Some(account_id) = parts.next() else {
+            continue;
+        };
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            continue;
+        }
+        out.push(account_id.to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub(crate) fn nearxd_keychain_has_credential(
     network: &str,
     account_id: &str,
     public_key: &str,
 ) -> bool {
     let scoped = nearxd_credential_account_key(network, account_id, public_key);
-    keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped)
+    if keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped) {
+        return true;
+    }
+
+    let legacy_account = nearxd_credential_account_legacy(network, account_id);
+    let Some(raw) = keychain_read_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account) else {
+        return false;
+    };
+    let credential = match parse_stored_near_credential(
+        &raw,
+        account_id,
+        &format!(
+            "nearxd keychain {} / {}",
+            KEYCHAIN_NEAR_CREDENTIAL_SERVICE, legacy_account
+        ),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "nearxd: failed to parse legacy keychain credential for {}:{}: {}",
+                network,
+                account_id,
+                e
+            );
+            return false;
+        }
+    };
+    if credential.account_id != account_id || credential.public_key != public_key {
+        return false;
+    }
+    maybe_backfill_scoped_nearxd_keychain_credential(network, &credential);
+    true
+}
+
+pub(crate) fn normalize_keychain_protection(protection: &str) -> Option<&'static str> {
+    match protection.trim().to_ascii_lowercase().as_str() {
+        KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET => Some(KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET),
+        KEYCHAIN_PROTECTION_USER_PRESENCE => Some(KEYCHAIN_PROTECTION_USER_PRESENCE),
+        KEYCHAIN_PROTECTION_UNPROTECTED => Some(KEYCHAIN_PROTECTION_UNPROTECTED),
+        KEYCHAIN_PROTECTION_UNKNOWN => Some(KEYCHAIN_PROTECTION_UNKNOWN),
+        _ => None,
+    }
 }
 
 pub(crate) fn near_cli_secure_has_credential(
@@ -250,14 +420,17 @@ pub(crate) fn store_near_credential_keychain(
     cred: &ParsedNearCredential,
     overwrite: bool,
     protection: &str,
-) -> Result<&'static str, String> {
-    if !cfg!(target_os = "macos") {
-        return Err("credential keychain storage is only supported on macOS".to_string());
+) -> Result<StoredNearCredentialKeychainResult, String> {
+    if !secure_store_persistence_supported() {
+        return Err("OS secure storage is unavailable on this platform".to_string());
     }
 
     let account = nearxd_credential_account_key(network, &cred.account_id, &cred.public_key);
     if !overwrite && keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &account) {
-        return Ok("skipped_existing");
+        return Ok(StoredNearCredentialKeychainResult {
+            keychain_status: "skipped_existing",
+            keychain_protection: None,
+        });
     }
 
     let payload = json!({
@@ -270,8 +443,8 @@ pub(crate) fn store_near_credential_keychain(
     let encoded =
         serde_json::to_string(&payload).map_err(|e| format!("encode credential payload: {e}"))?;
     let biometry_only = match protection {
-        "biometry_current_set" => true,
-        "user_presence" => false,
+        KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET => true,
+        KEYCHAIN_PROTECTION_USER_PRESENCE => false,
         _ => {
             return Err(format!(
                 "unsupported keychain credential protection mode: {protection}"
@@ -279,16 +452,32 @@ pub(crate) fn store_near_credential_keychain(
         }
     };
 
-    keychain_write_generic_protected(
+    let outcome = keychain_write_generic_protected(
         KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
         &account,
         &encoded,
         biometry_only,
     )?;
-    Ok(if biometry_only {
-        "stored_biometry_current_set"
+    Ok(if !secure_store_prompt_reads_supported() {
+        StoredNearCredentialKeychainResult {
+            keychain_status: "stored_secure_store",
+            keychain_protection: None,
+        }
+    } else if matches!(outcome, ProtectedWriteOutcome::FellBackUnprotected) {
+        StoredNearCredentialKeychainResult {
+            keychain_status: "stored_unprotected_fallback",
+            keychain_protection: Some(KEYCHAIN_PROTECTION_UNPROTECTED),
+        }
+    } else if biometry_only {
+        StoredNearCredentialKeychainResult {
+            keychain_status: "stored_biometry_current_set",
+            keychain_protection: Some(KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET),
+        }
     } else {
-        "stored_user_presence"
+        StoredNearCredentialKeychainResult {
+            keychain_status: "stored_user_presence",
+            keychain_protection: Some(KEYCHAIN_PROTECTION_USER_PRESENCE),
+        }
     })
 }
 
@@ -298,10 +487,6 @@ pub(crate) fn read_near_credential_keychain(
     signer_public_key: Option<&str>,
     reason: &str,
 ) -> Result<Value, String> {
-    if !cfg!(target_os = "macos") {
-        return Err("credential keychain reads are only supported on macOS".to_string());
-    }
-
     let (raw, keychain_account) = if let Some(public_key) = signer_public_key {
         let scoped_account = nearxd_credential_account_key(network, account_id, public_key);
         match keychain_read_generic_with_prompt(
@@ -335,34 +520,40 @@ pub(crate) fn read_near_credential_keychain(
 
     let mut payload =
         serde_json::from_str::<Value>(&raw).map_err(|e| format!("decode stored payload: {e}"))?;
+    let keychain_display = format!(
+        "nearxd keychain {} / {}",
+        KEYCHAIN_NEAR_CREDENTIAL_SERVICE, keychain_account
+    );
+    let parsed = parse_stored_near_credential(&raw, account_id, &keychain_display)?;
+    if parsed.account_id != account_id {
+        return Err(format!(
+            "credential in keychain account '{}' does not match requested account_id '{}'",
+            keychain_account, account_id
+        ));
+    }
 
     if let Some(requested_public_key) = signer_public_key {
-        let payload_public_key = payload
-            .get("public_key")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .or_else(|| {
-                payload
-                    .get("private_key")
-                    .and_then(Value::as_str)
-                    .and_then(|raw_sk| raw_sk.parse::<SecretKey>().ok())
-                    .map(|sk| sk.public_key().to_string())
-            });
-        let matched = payload_public_key
-            .as_deref()
-            .map(|pk| pk == requested_public_key)
-            .unwrap_or(false);
-        if !matched {
+        if parsed.public_key != requested_public_key {
             return Err(format!(
                 "credential in keychain account '{}' does not match requested public_key '{}'",
                 keychain_account, requested_public_key
             ));
         }
     }
+    if keychain_account == nearxd_credential_account_legacy(network, account_id) {
+        maybe_backfill_scoped_nearxd_keychain_credential(network, &parsed);
+    }
 
     if let Some(obj) = payload.as_object_mut() {
+        obj.insert("account_id".to_string(), json!(parsed.account_id));
+        obj.insert("public_key".to_string(), json!(parsed.public_key));
+        obj.insert("private_key".to_string(), json!(parsed.private_key));
         obj.insert("keychain_account".to_string(), json!(keychain_account));
         obj.insert("source".to_string(), json!(SOURCE_NEARXD_KEYCHAIN));
+        obj.insert(
+            "storage_backend".to_string(),
+            json!(secure_store_backend_name()),
+        );
     }
     Ok(payload)
 }
@@ -372,10 +563,6 @@ pub(crate) fn read_near_cli_secure_credential(
     account_id: &str,
     public_key: &str,
 ) -> Result<Value, String> {
-    if !cfg!(target_os = "macos") {
-        return Err("near-cli secure keychain reads are only supported on macOS".to_string());
-    }
-
     let service = near_cli_secure_service(network, account_id);
     let account = near_cli_secure_account(account_id, public_key);
     let raw = keychain_read_generic(&service, &account).ok_or_else(|| {
@@ -398,6 +585,39 @@ pub(crate) fn read_near_cli_secure_credential(
         "source": SOURCE_NEAR_CLI_SECURE,
         "service": service,
         "keychain_account": account,
+        "storage_backend": secure_store_backend_name(),
+    }))
+}
+
+pub(crate) fn read_legacy_credential(
+    credentials_dir: &Path,
+    network: &str,
+    account_id: &str,
+    signer_public_key: Option<&str>,
+) -> Result<Value, String> {
+    let legacy = collect_legacy_credentials(credentials_dir)?;
+    let candidate = legacy
+        .into_iter()
+        .find(|entry| {
+            entry.credential.account_id == account_id
+                && signer_public_key
+                    .map(|public_key| entry.credential.public_key == public_key)
+                    .unwrap_or(true)
+        })
+        .ok_or_else(|| {
+            if let Some(public_key) = signer_public_key {
+                format!("legacy credential not found for {network}:{account_id}:{public_key}")
+            } else {
+                format!("legacy credential not found for {network}:{account_id}")
+            }
+        })?;
+    Ok(json!({
+        "network": network,
+        "account_id": candidate.credential.account_id,
+        "public_key": candidate.credential.public_key,
+        "private_key": candidate.credential.private_key,
+        "source": SOURCE_LEGACY_FILE,
+        "file": candidate.path.display().to_string(),
     }))
 }
 

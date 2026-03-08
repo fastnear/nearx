@@ -14,8 +14,44 @@ This document covers the signing infrastructure for the NEARx Tauri desktop app.
 ## Prerequisites
 
 1. **Apple Developer Program** enrollment ($99/year) at [developer.apple.com](https://developer.apple.com/programs/)
-2. **Developer ID Application** certificate created in Certificates, Identifiers & Profiles
-3. **App-specific password** or **App Store Connect API key** for notarization
+2. One of:
+   - **Apple Development** certificate for local signed QA builds
+   - **Developer ID Application** certificate for release/distribution builds
+3. **App-specific password** or **App Store Connect API key** for notarization (release/distribution only)
+
+## Build Types
+
+### Local signed QA build
+
+- Purpose: test biometric Keychain / fingerprint behavior locally
+- Acceptable signing identities:
+  - `Apple Development: ...`
+  - `Developer ID Application: ...`
+- Notarization: not required
+- Gatekeeper (`spctl`): may still reject `Apple Development` builds, which is acceptable for local QA
+
+Recommended command:
+
+```bash
+yarn build:macos-qa
+open tauri-workspace/target/debug/bundle/macos/NEARx.app
+```
+
+The script:
+
+- prefers `APPLE_SIGNING_IDENTITY` if set
+- otherwise auto-picks `Developer ID Application` first, then `Apple Development`
+- rebuilds `web/dist`
+- rebuilds the bundled `nearxd` sidecar
+- runs `cargo tauri build --debug --bundles app`
+- fails if either the app bundle or bundled `nearxd` is still ad-hoc signed
+
+### Release / distribution build
+
+- Purpose: shareable release artifact outside local development
+- Required signing identity: `Developer ID Application: ...`
+- Required follow-up: notarization + stapling
+- Gatekeeper: should pass after notarization
 
 ## Local Signing
 
@@ -61,6 +97,8 @@ codesign --deep --force --verify --verbose \
 codesign -dvv tauri-workspace/src-tauri/target/release/bundle/macos/NEARx.app
 spctl --assess --type exec --verbose tauri-workspace/src-tauri/target/release/bundle/macos/NEARx.app
 ```
+
+For local QA builds signed with `Apple Development`, `spctl` rejection is expected until the app is notarized or otherwise distributed through a trusted local workflow. The relevant biometric gate is code signing, not Gatekeeper acceptance.
 
 ## Notarization
 
@@ -134,3 +172,34 @@ For GitHub Actions, add these repository secrets:
 ## Sidecar Signing
 
 The nearxd sidecar binary bundled at `Contents/MacOS/nearxd-<triple>` is automatically signed with the same identity when `codesign --deep` is used. Tauri's bundler handles this when `signingIdentity` is configured.
+
+## Version Alignment
+
+The Tauri JS packages in `web/package.json` must stay pinned to versions compatible with the Rust crates in `tauri-workspace/Cargo.lock`. Avoid floating `^` ranges for:
+
+- `@tauri-apps/api`
+- `@tauri-apps/plugin-deep-link`
+
+If `cargo tauri build` reports mismatched package versions, align the JS pins first and rerun `yarn install`.
+
+## Fingerprint QA Gate
+
+Fingerprint-protected Keychain signing must be validated on a properly signed macOS app bundle. Ad-hoc debug binaries and ad-hoc bundled `.app` artifacts can still read and write normal Keychain entries, but protected Keychain writes may fall back to unprotected storage and will not satisfy NEARx's biometric Keychain checks.
+
+For local QA, an `Apple Development`-signed bundle is sufficient as long as both the app and bundled `nearxd` are non-adhoc signed. For release/distribution QA, require `Developer ID Application` plus notarization.
+
+Before treating Touch ID / fingerprint behavior as a release result, verify:
+
+```bash
+codesign -dv --verbose=4 path/to/NEARx.app 2>&1 | rg 'Signature|TeamIdentifier'
+codesign -dv --verbose=4 path/to/NEARx.app/Contents/MacOS/nearxd 2>&1 | rg 'Signature|TeamIdentifier'
+```
+
+Neither binary should report `Signature=adhoc`.
+
+Local QA bundles should also report a real `TeamIdentifier`, for example:
+
+```bash
+codesign -dv --verbose=4 tauri-workspace/target/debug/bundle/macos/NEARx.app 2>&1 | rg 'Authority|TeamIdentifier|Signature'
+codesign -dv --verbose=4 tauri-workspace/target/debug/bundle/macos/NEARx.app/Contents/MacOS/nearxd 2>&1 | rg 'Authority|TeamIdentifier|Signature'
+```

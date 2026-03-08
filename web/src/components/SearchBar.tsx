@@ -92,17 +92,17 @@ export default function SearchBar() {
           onKeyDown={handleInputKeyDown}
           autoCapitalize="none"
           placeholder="Search tx, block, or account"
-          className="w-full rounded-lg border border-gray-300 bg-surface px-4 py-2 pr-20 text-sm focus:border-blue-500 focus:outline-none"
+          className="w-full rounded-lg border border-gray-300 bg-surface px-4 py-2.5 pr-24 text-base focus:border-blue-500 focus:outline-none"
         />
         {typeHint && (
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">
             {typeHint}
           </span>
         )}
       </div>
       <button
         type="submit"
-        className="rounded-lg bg-blue-600 px-3 py-2 sm:px-4 text-sm font-medium text-white hover:bg-blue-700"
+        className="rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-blue-700 sm:px-4"
       >
         <Search className="size-4 sm:hidden" />
         <span className="hidden sm:inline">Search</span>

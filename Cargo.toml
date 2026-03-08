@@ -26,6 +26,7 @@ path = "src/bin/nearxd/main.rs"
 resolver = "2"
 members = [
   ".",
+  "nearx-broker-ipc",
 ]
 exclude = [
   "native-host",
@@ -99,6 +100,7 @@ dom-web = [
 [dependencies]
 # Core dependencies (both platforms)
 anyhow = "1"
+nearx-broker-ipc = { path = "nearx-broker-ipc" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rmp-serde = "1.3"  # MessagePack binary serialization for performance
@@ -112,6 +114,12 @@ borsh = "1"
 cfg-if = "1"
 urlencoding = "2.1"
 slipped10 = "0.4.6"
+keyring = { version = "3.0.5", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "vendored",
+] }
 
 # Ratatui (with conditional backend)
 ratatui = { version = "0.29", default-features = false }
@@ -184,15 +192,20 @@ security-framework = "2"
 security-framework-sys = "2"
 core-foundation = "0.9"
 core-foundation-sys = "0.8"
+keyring-search = { version = "1.2.2", default-features = false, features = ["platform-macos", "regex"] }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ledger-apdu = "0.11"
 ledger-transport = "0.11"
 ledger-transport-hid = "0.11"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 copypasta = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring-search = { version = "1.2.2", default-features = false, features = ["platform-linux", "regex"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring-search = { version = "1.2.2", default-features = false, features = ["platform-windows"] }
 
 # Production build optimizations
 [profile.release]

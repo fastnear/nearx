@@ -18,11 +18,17 @@ use gloo_timers::future::sleep;
 
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 
+pub const NEARX_CLIENT_HEADER: &str = concat!("nearx/", env!("CARGO_PKG_VERSION"));
+
 pub fn http_client() -> &'static reqwest::Client {
     HTTP.get_or_init(|| {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("X-Nearx-Client", NEARX_CLIENT_HEADER.parse().unwrap());
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             reqwest::Client::builder()
+                .default_headers(headers)
                 .pool_max_idle_per_host(8)
                 .tcp_nodelay(true)
                 .build()
@@ -31,7 +37,10 @@ pub fn http_client() -> &'static reqwest::Client {
 
         #[cfg(target_arch = "wasm32")]
         {
-            reqwest::Client::builder().build().expect("reqwest client")
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .expect("reqwest client")
         }
     })
 }

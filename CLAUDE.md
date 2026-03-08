@@ -1,6 +1,6 @@
 # NEARx Engineering Continuity
 
-Status date: 2026-03-05
+Status date: 2026-03-08
 
 This file is a technical continuity reference for maintainers and collaborators. It captures current architecture, runtime contracts, and integration boundaries across all targets.
 
@@ -31,12 +31,14 @@ Key directories:
 
 - `src/` - shared core crate (`nearx`)
 - `src/bin/nearx.rs` - native TUI entrypoint
-- `src/bin/nearxd.rs` - local broker daemon
+- `src/bin/nearxd/` - local broker daemon (modular: main, broker, socket, token, keychain, credentials, settings, signing, hardware_wallet, user_presence, rpc, config, util, tests)
+- `src/bin/nearx-proxy.rs` - backend HTTP proxy server for web frontend
 - `native-host/` - browser native messaging host (stdio length-prefixed JSON)
 - `extension/` - browser extension (MV3)
 - `tauri-workspace/src-tauri/` - desktop shell and IPC commands
 - `web/` - React/TypeScript frontend (synced from `fastnear/explorer-frontend`)
 - `e2e-tests/` - Playwright + Selenium E2E suite
+- `tools/build-macos-qa.sh` - local macOS signed QA build (prefers `Developer ID Application`, falls back to `Apple Development`, verifies app + sidecar are non-adhoc)
 
 ## 3. Build Targets And Shared Core
 
@@ -51,8 +53,9 @@ NEARx is quad-target with one Rust core.
 ### 3.2 Web Frontend
 
 - Entry: `web/src/main.tsx` (React 18 / TypeScript / Tailwind v4 / Vite)
-- Build: `yarn workspace explorer-frontend build` (output: `web/dist/`)
-- Dev: `yarn workspace explorer-frontend dev`
+- Build: `npm --prefix web run build` (output: `web/dist/`)
+- Dev: `npm --prefix web run dev`
+- Test: `npm --prefix web run test`
 - Synced from `fastnear/explorer-frontend` with NEARx additions (see section 10)
 - Tauri integration: `web/src/tauri/runtime.ts`, `web/src/tauri/deeplink.ts`
 
@@ -62,7 +65,8 @@ NEARx is quad-target with one Rust core.
 - Webview frontend: `web/`
 - Deep link scheme registration: `nearx`
 - Sidecar: auto-spawns `nearxd` if no standalone instance is running (see section 8)
-- Sidecar build: `bash tools/build-sidecar.sh` (copies binary to `tauri-workspace/src-tauri/binaries/`)
+- Sidecar build: `node tools/build-sidecar.mjs` (copies binary to `tauri-workspace/src-tauri/binaries/`, including `.exe` on Windows)
+- Local signed QA build: `yarn build:macos-qa` (macOS only)
 
 ### 3.4 Extension + Native Host
 
@@ -70,7 +74,15 @@ NEARx is quad-target with one Rust core.
 - Native host: `native-host/src/main.rs`
 - Host manifest template: `native-host/com.nearx.native.json`
 
-### 3.5 Visual Design Notes
+### 3.5 Backend Proxy
+
+- Binary: `nearx-proxy`
+- Entry: `src/bin/nearx-proxy.rs`
+- Features: `proxy`
+- Lightweight HTTP API wrapping NEAR RPC calls for the web frontend
+- Endpoints: `/health`, `/rpc` (JSON-RPC proxy), `/api/latest`, `/api/block/:height`, `/api/blocks`
+
+### 3.6 Visual Design Notes
 
 The native TUI (`nearx`) uses `src/theme.rs::Theme` for its palette and rendering semantics.
 
@@ -124,9 +136,17 @@ Current mapping:
 
 ## 6. nearxd Broker
 
-File: `src/bin/nearxd.rs`
-Transport: newline-delimited JSON over unix socket.
-Default socket path: `${TMPDIR:-/tmp}/nearxd.sock` (override `NEARXD_SOCKET_PATH`).
+Directory: `src/bin/nearxd/` (entry: `main.rs`)
+Transport: newline-delimited JSON over local sockets via `interprocess`.
+Default endpoint:
+
+- macOS/Linux: filesystem socket at `${TMPDIR:-/tmp}/nearxd.sock`
+- Windows: namespaced local endpoint `name:nearxd`
+
+Endpoint env vars:
+
+- `NEARXD_ENDPOINT` (canonical, cross-platform)
+- `NEARXD_SOCKET_PATH` (legacy Unix compatibility alias)
 
 ### 6.1 Method Surface
 
@@ -134,6 +154,7 @@ Implemented methods:
 
 - `ping`
 - `get_runtime_config`
+- `get_signing_capabilities`
 - `parse_deep_link`
 - `resolve_fastnear_auth_token` (`get_fastnear_auth_token` alias)
 - `resolve_fastnear_api_key` (`get_fastnear_api_key` alias)
@@ -144,6 +165,14 @@ Implemented methods:
 - `request_user_presence`
 - `get_signing_settings`
 - `set_signing_settings`
+- `list_staking_watchlist`
+- `add_staking_watchlist_account`
+- `remove_staking_watchlist_account`
+- `connect_hardware_wallet`
+- `list_near_signing_accounts`
+- `list_near_signing_keys`
+- `import_near_signing_keys`
+- `reprotect_near_signing_key`
 - `list_near_credentials`
 - `import_near_credentials`
 - `get_near_credential`
@@ -165,6 +194,14 @@ Request auth format:
 
 - append key as `?apiKey=<KEY>` on FastNear RPC/API URLs
 
+Client identification:
+
+- All outbound HTTP requests include `X-Nearx-Client` header
+- Rust TUI: `nearx/<version>` (via shared `reqwest::Client` in `src/rpc_utils.rs`)
+- Rust daemon: `nearxd/<version>` (in `src/bin/nearxd/rpc.rs`)
+- Rust proxy: `nearx/<version>` (in `src/bin/nearx-proxy.rs`)
+- Web frontend: `nearx-web` (via `nearxHeaders` in `web/src/config.ts`)
+
 Backend selection (`NEARXD_TOKEN_BACKEND`):
 
 - `auto` (default)
@@ -182,10 +219,20 @@ macOS keychain identity:
 - service: `nearxd.fastnear.auth`
 - account: `fastnear_auth_token`
 
-Additional keychain services:
+Additional secure-store services:
 
-- `nearxd.near.credentials` (account namespace: `<network>:<account_id>`)
+- `nearxd.near.credentials` (scoped account namespace: `<network>:<account_id>:<public_key>`, with legacy fallback `<network>:<account_id>`)
 - `nearxd.signing.settings` (account: `default`)
+- near-cli secure credentials: service `near-<network>-<account_id>`, account `<account_id>:<public_key>`
+
+macOS signer protection semantics:
+
+- nearxd tracks indexed `nearxd_keychain_protection` metadata per signing key
+- `biometry_current_set` is the only macOS Keychain state NEARx treats as fingerprint-ready for signing
+- legacy or fallback Keychain items surface as `unknown`, `unprotected`, or `user_presence` and require explicit import/repair before `credential_source=nearxd_keychain` is allowed
+- Keychain import is additive only; original `legacy_file` and `near_cli_secure` sources remain available
+- ad-hoc debug Tauri builds may fall back to weaker local sources because protected Keychain writes are not reliable without a properly signed app bundle and signed `nearxd` sidecar
+- local biometric QA can use an `Apple Development`-signed bundle; release/distribution still requires `Developer ID Application` and notarization
 
 User-presence adapter env:
 
@@ -216,13 +263,47 @@ Guardrails:
 
 ### 6.4 Credential Import And Settings
 
-`import_near_credentials` supports importing `~/.near-credentials/<network>` JSON credentials, optionally requiring user presence and persisting into keychain.
+`import_near_credentials` and `import_near_signing_keys` support importing legacy `~/.near-credentials/<network>` JSON credentials and near-cli secure credentials from the OS secure store.
 
-`get_signing_settings` / `set_signing_settings` manage signing-related settings, with keychain-preferred persistence and file fallback (`~/.nearx/signing_settings.json`).
+Secure-store behavior:
 
-Credential keychain account namespace:
+- wire field `persist_in_keychain` is retained for compatibility, but now means "persist in OS secure storage"
+- macOS uses Keychain
+- Linux uses Secret Service/libsecret
+- Windows uses Credential Manager
+- if secure storage is unavailable, the broker reports capability failure instead of silently storing plaintext credentials
 
-- `<network>:<account_id>` under service `nearxd.near.credentials`
+User-presence behavior:
+
+- `require_user_presence` is only enforced when the active adapter reports support
+- in practice this is macOS `LocalAuthentication` or the mock adapter used in tests
+- Linux/Windows imports and reads rely on OS secure-store protections without a separate biometric prompt
+- macOS imports now report actual Keychain protection outcomes and may surface `nearxd_keychain_import_required=true` when the resulting Keychain copy is not verified biometric
+
+Signer discovery / enforcement:
+
+- `list_near_signing_keys` rows now include `nearxd_keychain_protection` and `nearxd_keychain_import_required`
+- `reprotect_near_signing_key` repairs an existing nearxd Keychain item in place
+- `sign_transaction` rejects explicit `credential_source=nearxd_keychain` with `ERR_IMPORT_REQUIRED` unless indexed protection is `biometry_current_set`
+
+`get_signing_settings` / `set_signing_settings` manage signing-related settings, with secure-store-preferred persistence and file fallback (`~/.nearx/signing_settings.json`). Returned source strings may still use the historical label `keychain` for compatibility.
+
+`get_signing_capabilities` returns:
+
+- `platform`
+- `transport`
+- `secure_store_backend`
+- `supports_legacy_import`
+- `supports_near_cli_secure`
+- `supports_secure_store_persistence`
+- `supports_user_presence`
+- `supports_hardware_wallet_connect`
+- `supports_hardware_wallet_sign`
+
+Credential secure-store account namespace:
+
+- `<network>:<account_id>:<public_key>` under service `nearxd.near.credentials`
+- legacy fallback `<network>:<account_id>` remains readable for backward compatibility
 
 ## 7. Native Host Protocol
 
@@ -264,23 +345,34 @@ File: `tauri-workspace/src-tauri/src/main.rs`
 
 ### 8.1 nearxd Sidecar
 
-On startup, the Tauri app checks the default nearxd socket path:
+On startup, the Tauri app checks the configured broker endpoint:
 
 - If a standalone `nearxd` is already listening, it reuses that instance
 - Otherwise, it spawns `nearxd` as a managed sidecar via `tauri-plugin-shell`
-  - Sidecar socket: `$TMPDIR/nearxd-tauri-<pid>.sock`
-  - `NEARXD_SOCKET_PATH` env is pointed at the sidecar socket
+  - macOS/Linux sidecar endpoint: `$TMPDIR/nearxd-tauri-<pid>.sock`
+  - Windows sidecar endpoint: `name:nearxd-tauri-<pid>`
+  - `NEARXD_ENDPOINT` env is always pointed at the sidecar endpoint
+  - `NEARXD_SOCKET_PATH` is also exported on Unix for compatibility
   - Sidecar is killed on app exit (`SidecarChild` drop)
-- Sidecar binary must be pre-built: `bash tools/build-sidecar.sh`
+- Sidecar binary must be pre-built: `node tools/build-sidecar.mjs`
 - If the sidecar binary is not bundled, broker-dependent features (credentials, signing, deep-link parsing) are unavailable
 
 ### 8.2 Tauri Commands
 
-All commands forward to `nearxd` via unix socket:
+Broker-backed commands forward to `nearxd` via the local-socket transport:
 
 - `open_external`
 - `get_runtime_config`
+- `get_signing_capabilities`
 - `request_user_presence`
+- `list_staking_watchlist`
+- `add_staking_watchlist_account`
+- `remove_staking_watchlist_account`
+- `connect_hardware_wallet`
+- `list_near_signing_accounts`
+- `list_near_signing_keys`
+- `import_near_signing_keys`
+- `reprotect_near_signing_key`
 - `list_near_credentials`
 - `import_near_credentials`
 - `sign_transaction`
@@ -315,6 +407,67 @@ Modes:
 - **Standalone mode**: same app served by Vite, configurable `VITE_API_BASE_URL` for API endpoint
 
 The frontend communicates with `nearxd` only when running inside Tauri (via Tauri commands that forward to the broker). In standalone mode, it talks directly to NEAR RPC endpoints.
+
+### 9.1 Signer UX Architecture
+
+Current signer/account UX for NEARx-only pages is shared rather than page-local.
+
+- Shared signer selection state: `web/src/hooks/useSignerSelection.ts`
+  - owns selected account, public key, credential source, account/key reloads, and source fallback resolution
+  - uses `list_near_signing_accounts` + `list_near_signing_keys` through Tauri runtime methods
+  - persists the last selected credential source per `(page context, account_id, public_key)` via `web/src/hooks/useAccountPrefs.ts`
+- Shared signer summary/status priority: `web/src/lib/signerSummaryStatus.ts`
+  - used by both `web/src/pages/Staking.tsx` and `web/src/pages/SignTransaction.tsx`
+  - normal priority order is: hardware error -> blocking error -> neutral/selection-needed -> source-needed -> incompatible -> advisory -> ready
+- Shared Keychain import/repair semantics:
+  - `web/src/lib/sourceUpgrade.ts`
+  - `web/src/lib/signerSourceSelection.ts`
+  - when `nearxd_keychain_import_required=true`, both Staking and Sign Tx block `Keychain` signing and show inline import/repair CTA
+  - if the user explicitly switches to `File system` or `OS secrets`, actions remain allowed but the UI warns that fingerprint verification is not used
+- Shared quick controls and modal shell:
+  - `web/src/components/SignerQuickSelectors.tsx`
+  - `web/src/components/SignerSummaryCard.tsx`
+  - `web/src/components/ManageSignerPanel.tsx`
+  - `web/src/components/LedgerConnectionPanel.tsx`
+
+### 9.2 Staking Page Behavior
+
+File: `web/src/pages/Staking.tsx`
+
+- The selected staking account is the canonical account for both delegation loading and signer key loading
+- The watchlist is a saved-account convenience list, not a separate source of truth for signer readiness
+- Choosing an account from signer controls auto-seeds the watchlist if needed
+- Staking actions require a full-access key with a usable local source
+- When `Keychain` is the selected source on macOS, staking actions additionally require verified biometric protection (`nearxd_keychain_import_required=false`)
+- Action success UI now shows the full transaction hash, not a truncated hash fragment
+
+### 9.3 Sign Transaction Behavior
+
+File: `web/src/pages/SignTransaction.tsx`
+
+- Receiver remains independent from signer selection except when it is blank and a signer account is first chosen
+- Confirmation modal supports three actions:
+  - Cancel
+  - Sign
+  - Sign + broadcast
+- Broadcast results are summarized via `web/src/lib/broadcastSummary.ts`
+  - tx hash is shown on both success and failure paths
+  - raw RPC broadcast payload remains available for inspection when present
+
+### 9.4 Frontend Test Harness
+
+Minimal frontend unit/smoke coverage now exists under `web/`.
+
+- Runner/config:
+  - `web/package.json`
+  - `web/vite.config.ts`
+  - `web/src/test/setup.ts`
+- Current targeted tests:
+  - `web/src/hooks/useAccountPrefs.test.tsx`
+  - `web/src/lib/signerSummaryStatus.test.ts`
+  - `web/src/lib/broadcastSummary.test.ts`
+
+This is not a full browser E2E replacement. For signer regressions, keep desktop/manual validation for staking and Sign Tx flows in addition to `npm --prefix web run test`.
 
 ## 10. Explorer Frontend Upstream Parity
 
@@ -395,6 +548,7 @@ cargo check --bin nearx
 cargo test --lib
 cargo check --bin nearxd
 cargo test --bin nearxd
+cargo check --bin nearx-proxy --features proxy
 cargo check --manifest-path native-host/Cargo.toml
 cargo test --manifest-path native-host/Cargo.toml
 cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml
@@ -407,10 +561,16 @@ Web frontend typecheck:
 cd web && npx tsc -b
 ```
 
+Web frontend tests:
+
+```bash
+npm --prefix web run test
+```
+
 Build nearxd sidecar (required for Tauri dev):
 
 ```bash
-bash tools/build-sidecar.sh
+node tools/build-sidecar.mjs
 ```
 
 Tauri dev (single command — starts Vite + spawns nearxd sidecar):

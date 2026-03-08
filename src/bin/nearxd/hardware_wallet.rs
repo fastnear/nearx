@@ -2,6 +2,7 @@ use near_crypto::PublicKey;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
 
 use crate::credentials::{
     collect_legacy_credentials, credential_curve_type, near_cli_secure_has_credential,
@@ -11,8 +12,8 @@ use crate::credentials::{
 use crate::rpc::{access_key_permission_to_summary, fetch_onchain_access_keys};
 use crate::settings::{
     hardware_wallet_record_for_key, load_signing_settings, persist_signing_settings,
-    upsert_hardware_wallet_index, upsert_signing_key_index, HardwareWalletIndexRecord,
-    IndexedSigningKeyRecord,
+    signing_key_label, upsert_hardware_wallet_index, upsert_signing_key_index,
+    HardwareWalletIndexRecord, IndexedSigningKeyRecord,
 };
 use crate::signing::{ordered_sources_from_set, preferred_source_from_set};
 use crate::util::now_ms;
@@ -73,6 +74,24 @@ pub(crate) fn mock_ledger_get_public_key(path: &str) -> PublicKey {
     mock_ledger_secret_key(path).public_key()
 }
 
+fn implicit_account_id_from_public_key(
+    public_key: &PublicKey,
+) -> Result<String, HardwareWalletError> {
+    let key_type = public_key.key_type();
+    let PublicKey::ED25519(_) = public_key else {
+        return Err(HardwareWalletError::new(
+            "ERR_HARDWARE_UNSUPPORTED_KEY_TYPE",
+            format!("implicit account derivation requires an ed25519 public key, got {key_type}"),
+        ));
+    };
+
+    let mut account_id = String::with_capacity(public_key.key_data().len() * 2);
+    for byte in public_key.key_data() {
+        let _ = write!(&mut account_id, "{byte:02x}");
+    }
+    Ok(account_id)
+}
+
 fn mock_ledger_sign_transaction(
     unsigned_tx: &[u8],
     path: &str,
@@ -90,30 +109,30 @@ fn mock_ledger_sign_transaction(
     Ok(mock_ledger_secret_key(path).sign(tx_hash.as_ref()))
 }
 
-// Ledger APDU constants and functions (unix: macOS and Linux)
+// Ledger APDU constants and functions for native desktop targets.
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_CLA: u8 = 0x80;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_INS_GET_PUBLIC_KEY: u8 = 0x04;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_INS_SIGN_TRANSACTION: u8 = 0x02;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_RETURN_CODE_OK: u16 = 0x9000;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_CHUNK_SIZE: usize = 250;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_NETWORK_ID: u8 = b'W';
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_P1_GET_PUBLIC_KEY_DISPLAY: u8 = 0x00;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_P1_GET_PUBLIC_KEY_SILENT: u8 = 0x01;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_P1_SIGN_CHUNK: u8 = 0x00;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_P1_SIGN_LAST_CHUNK: u8 = 0x80;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn map_ledger_retcode(retcode: u16) -> HardwareWalletError {
     match retcode {
         0x5501 => HardwareWalletError::new(
@@ -139,7 +158,7 @@ fn map_ledger_retcode(retcode: u16) -> HardwareWalletError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn map_ledger_transport_error(err: impl ToString) -> HardwareWalletError {
     let msg = err.to_string();
     let lower = msg.to_ascii_lowercase();
@@ -153,14 +172,14 @@ fn map_ledger_transport_error(err: impl ToString) -> HardwareWalletError {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_hd_path_to_bytes(hd_path: &slipped10::BIP32Path) -> Vec<u8> {
     (0..hd_path.depth())
         .flat_map(|index| hd_path.index(index).unwrap().to_be_bytes())
         .collect::<Vec<u8>>()
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_get_transport() -> Result<ledger_transport_hid::TransportNativeHID, HardwareWalletError> {
     use ledger_transport_hid::hidapi::{HidApi, HidError};
     use ledger_transport_hid::LedgerHIDError;
@@ -170,7 +189,7 @@ fn ledger_get_transport() -> Result<ledger_transport_hid::TransportNativeHID, Ha
         .map_err(|e: LedgerHIDError| map_ledger_transport_error(format!("{e:?}")))
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_exchange(
     command: &ledger_transport::APDUCommand<Vec<u8>>,
 ) -> Result<ledger_apdu::APDUAnswer<Vec<u8>>, HardwareWalletError> {
@@ -182,7 +201,7 @@ fn ledger_exchange(
         .map_err(|e: LedgerHIDError| map_ledger_transport_error(format!("{e:?}")))
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_running_app_name() -> Result<String, HardwareWalletError> {
     let command = ledger_transport::APDUCommand {
         cla: 0xB0,
@@ -212,7 +231,7 @@ fn ledger_running_app_name() -> Result<String, HardwareWalletError> {
     Ok(String::from_utf8_lossy(&data[2..2 + name_len]).to_string())
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_quit_current_app() -> Result<(), HardwareWalletError> {
     let command = ledger_transport::APDUCommand {
         cla: 0xB0,
@@ -229,7 +248,7 @@ fn ledger_quit_current_app() -> Result<(), HardwareWalletError> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_open_near_app() -> Result<(), HardwareWalletError> {
     match ledger_running_app_name()?.as_str() {
         "NEAR" => return Ok(()),
@@ -255,7 +274,7 @@ fn ledger_open_near_app() -> Result<(), HardwareWalletError> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_get_public_key(
     derivation_path: &slipped10::BIP32Path,
     display_confirm: bool,
@@ -292,7 +311,7 @@ fn ledger_get_public_key(
     )))
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn ledger_sign_transaction(
     unsigned_tx: &[u8],
     derivation_path: &slipped10::BIP32Path,
@@ -336,12 +355,25 @@ fn ledger_sign_transaction(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn ledger_open_near_app() -> Result<(), HardwareWalletError> {
     Err(HardwareWalletError::new(
         "ERR_UNAVAILABLE",
-        "hardware wallet support requires a Unix platform (macOS or Linux)",
+        "hardware wallet support is unavailable on this platform",
     ))
+}
+
+pub(crate) fn hardware_wallet_supported() -> bool {
+    match hardware_wallet_adapter().as_str() {
+        "none" => false,
+        "mock" => true,
+        "auto" | "hid" => cfg!(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )),
+        _ => false,
+    }
 }
 
 #[allow(clippy::needless_return)]
@@ -365,17 +397,17 @@ pub(crate) fn hardware_wallet_get_public_key(
         "mock" => Ok(mock_ledger_get_public_key(derivation_path)),
         "auto" | "hid" => {
             let path = parse_ledger_derivation_path(Some(derivation_path))?;
-            #[cfg(unix)]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             {
                 ledger_open_near_app()?;
                 return ledger_get_public_key(&path, display_confirm);
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 let _ = (path, display_confirm);
                 Err(HardwareWalletError::new(
                     "ERR_UNAVAILABLE",
-                    "hardware wallet support requires a Unix platform (macOS or Linux)",
+                    "hardware wallet support is unavailable on this platform",
                 ))
             }
         }
@@ -407,17 +439,17 @@ pub(crate) fn hardware_wallet_sign_transaction(
         "mock" => mock_ledger_sign_transaction(unsigned_tx, derivation_path),
         "auto" | "hid" => {
             let path = parse_ledger_derivation_path(Some(derivation_path))?;
-            #[cfg(unix)]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             {
                 ledger_open_near_app()?;
                 return ledger_sign_transaction(unsigned_tx, &path);
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 let _ = (path, unsigned_tx);
                 Err(HardwareWalletError::new(
                     "ERR_UNAVAILABLE",
-                    "hardware wallet support requires a Unix platform (macOS or Linux)",
+                    "hardware wallet support is unavailable on this platform",
                 ))
             }
         }
@@ -455,14 +487,10 @@ pub(crate) fn connect_hardware_wallet_result(
     let credentials_home_dir =
         crate::signing::resolve_credentials_home_dir(params).map_err(|e| ("ERR_IO", e))?;
 
-    let Some(raw_account_id) = crate::broker::parse_string(params, "account_id") else {
-        return Err((
-            "ERR_PARAMS",
-            "missing required string param: account_id".to_string(),
-        ));
-    };
-    let account_id =
-        crate::config::validate_account_id_param(raw_account_id).map_err(|e| ("ERR_PARAMS", e))?;
+    let requested_account_id = crate::broker::parse_string(params, "account_id")
+        .map(|raw| crate::config::validate_account_id_param(raw))
+        .transpose()
+        .map_err(|e| ("ERR_PARAMS", e))?;
     let wallet_type = crate::broker::parse_string(params, "wallet_type")
         .unwrap_or(HARDWARE_WALLET_TYPE_LEDGER)
         .to_ascii_lowercase();
@@ -483,18 +511,42 @@ pub(crate) fn connect_hardware_wallet_result(
         hardware_wallet_get_public_key(&wallet_type, &derivation_path, display_confirm)
             .map_err(|e| (e.code, e.message))?;
     let public_key_str = public_key.to_string();
-
-    let onchain_keys = fetch_onchain_access_keys(&account_id).map_err(|e| ("ERR_IO", e))?;
-    let Some(onchain_key) = onchain_keys
-        .iter()
-        .find(|item| item.public_key.trim() == public_key_str)
-    else {
-        return Err((
-            "ERR_HARDWARE_KEY_NOT_ON_ACCOUNT",
-            format!("ledger key {public_key_str} is not an access key on account {account_id}"),
-        ));
+    let implicit_account_id =
+        implicit_account_id_from_public_key(&public_key).map_err(|e| (e.code, e.message))?;
+    let account_id = requested_account_id
+        .clone()
+        .unwrap_or_else(|| implicit_account_id.clone());
+    let account_binding = if requested_account_id.is_some() {
+        "selected_account"
+    } else {
+        "implicit_account"
     };
-    let permission = access_key_permission_to_summary(&onchain_key.access_key);
+
+    let permission = if let Some(requested_account_id) = requested_account_id.as_ref() {
+        let onchain_keys =
+            fetch_onchain_access_keys(requested_account_id).map_err(|e| ("ERR_IO", e))?;
+        let Some(onchain_key) = onchain_keys
+            .iter()
+            .find(|item| item.public_key.trim() == public_key_str)
+        else {
+            return Err((
+                "ERR_HARDWARE_KEY_NOT_ON_ACCOUNT",
+                format!(
+                    "ledger key {public_key_str} is not an access key on account {requested_account_id}"
+                ),
+            ));
+        };
+        access_key_permission_to_summary(&onchain_key.access_key)
+    } else {
+        match fetch_onchain_access_keys(&account_id) {
+            Ok(onchain_keys) => onchain_keys
+                .iter()
+                .find(|item| item.public_key.trim() == public_key_str)
+                .map(|item| access_key_permission_to_summary(&item.access_key))
+                .unwrap_or_else(|| json!({ "kind": "unknown" })),
+            Err(_) => json!({ "kind": "unknown" }),
+        }
+    };
 
     let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
     if !settings.is_object() {
@@ -518,12 +570,14 @@ pub(crate) fn connect_hardware_wallet_result(
             network: network.clone(),
             account_id: account_id.clone(),
             public_key: public_key_str.clone(),
+            label: None,
             available_sources: vec![SOURCE_HARDWARE_WALLET.to_string()],
             in_nearxd_keychain: nearxd_keychain_has_credential(
                 &network,
                 &account_id,
                 &public_key_str,
             ),
+            nearxd_keychain_protection: None,
             last_seen_at_ms: now_ms(),
         }],
     );
@@ -556,12 +610,17 @@ pub(crate) fn connect_hardware_wallet_result(
     let importable = !in_nearxd_keychain
         && (available_sources.contains(SOURCE_LEGACY_FILE)
             || available_sources.contains(SOURCE_NEAR_CLI_SECURE));
+    let label = signing_key_label(&settings, &network, &account_id, &public_key_str);
 
     Ok(json!({
         "network": network,
         "wallet_type": wallet_type,
         "account_id": account_id,
+        "requested_account_id": requested_account_id,
+        "implicit_account_id": implicit_account_id,
+        "account_binding": account_binding,
         "public_key": public_key_str.clone(),
+        "label": label,
         "curve_type": credential_curve_type(&public_key_str),
         "permission": permission,
         "available_sources": ordered_sources,
@@ -569,6 +628,7 @@ pub(crate) fn connect_hardware_wallet_result(
         "in_nearxd_keychain": in_nearxd_keychain,
         "importable": importable,
         "derivation_path": derivation_path,
+        "storage_backend": crate::keychain::secure_store_backend_name(),
         "settings_save": {
             "saved": true,
             "source": settings_store,

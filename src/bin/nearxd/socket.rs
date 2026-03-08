@@ -1,43 +1,19 @@
-use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::sync::Arc;
 
+use nearx_broker_ipc::BrokerEndpoint;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
 
 use crate::broker::{handle_request, BrokerRequest, BrokerResponse, BrokerState};
 
-pub(crate) trait CloneableStream: Read + Write + Send + 'static {
-    fn clone_stream(&self) -> std::io::Result<Self>
-    where
-        Self: Sized;
-}
-
-#[cfg(unix)]
-impl CloneableStream for UnixStream {
-    fn clone_stream(&self) -> std::io::Result<Self> {
-        self.try_clone()
-    }
-}
-
 pub(crate) fn serve_connection<S>(stream: S, state: Arc<BrokerState>)
 where
-    S: CloneableStream,
+    S: Read + Write + Send + 'static,
 {
-    let peer_reader = match stream.clone_stream() {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("nearxd: clone stream failed: {e}");
-            return;
-        }
-    };
-
-    let mut reader = BufReader::new(peer_reader);
-    let mut writer = BufWriter::new(stream);
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
     loop {
@@ -67,8 +43,8 @@ where
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let _ = writeln!(writer, "{payload}");
-                let _ = writer.flush();
+                let _ = writeln!(reader.get_mut(), "{payload}");
+                let _ = reader.get_mut().flush();
                 continue;
             }
         };
@@ -82,30 +58,21 @@ where
             }
         };
 
-        if let Err(e) = writeln!(writer, "{payload}") {
+        if let Err(e) = writeln!(reader.get_mut(), "{payload}") {
             log::warn!("nearxd: write error: {e}");
             break;
         }
-        if let Err(e) = writer.flush() {
+        if let Err(e) = reader.get_mut().flush() {
             log::warn!("nearxd: flush error: {e}");
             break;
         }
     }
 }
 
-#[cfg(unix)]
-pub(crate) fn socket_path() -> PathBuf {
-    if let Ok(path) = env::var("NEARXD_SOCKET_PATH") {
-        let p = PathBuf::from(path.trim());
-        if !p.as_os_str().is_empty() {
-            return p;
-        }
-    }
-
-    env::temp_dir().join("nearxd.sock")
+pub(crate) fn broker_endpoint() -> BrokerEndpoint {
+    BrokerEndpoint::from_env()
 }
 
-#[cfg(unix)]
 pub(crate) fn prepare_socket_path(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create socket directory: {e}"))?;
@@ -120,18 +87,23 @@ pub(crate) fn prepare_socket_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-pub(crate) fn run_unix(state: Arc<BrokerState>) -> Result<(), String> {
-    let path = socket_path();
-    prepare_socket_path(&path)?;
+pub(crate) fn run(state: Arc<BrokerState>) -> Result<(), String> {
+    let endpoint = broker_endpoint();
+    if let Some(path) = endpoint.filesystem_path() {
+        prepare_socket_path(path)?;
+    }
 
-    let listener = UnixListener::bind(&path).map_err(|e| format!("bind socket: {e}"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("chmod socket: {e}"))?;
+    let listener = endpoint.bind().map_err(|e| format!("bind socket: {e}"))?;
 
-    log::info!("nearxd listening on {}", path.display());
+    #[cfg(unix)]
+    if let Some(path) = endpoint.filesystem_path() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod socket: {e}"))?;
+    }
 
-    for stream in listener.incoming() {
+    log::info!("nearxd listening on {}", endpoint.display());
+
+    for stream in listener {
         match stream {
             Ok(stream) => {
                 let state = state.clone();

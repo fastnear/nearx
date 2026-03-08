@@ -1,5 +1,5 @@
-import { apiBaseUrl } from "../config";
-import { getFastnearApiUrl } from "../tauri/runtime";
+import { apiBaseUrl, nearxHeaders } from "../config";
+import { fetchFastnearJson, getFastnearApiUrl } from "../tauri/runtime";
 
 const ENDPOINT_TTL_MS: Record<string, number> = {
   blocks: 3_000,
@@ -142,22 +142,34 @@ export async function fetchApi<T>(
   }
 
   const request = (async (): Promise<T> => {
-    debugCache("fetch_start", { endpoint, inflightCount: inflightRequests.size + 1 });
-    const res = await fetch(`${baseUrl}/v0/${endpoint}`, {
+    const requestUrl = `${baseUrl}/v0/${endpoint}`;
+    debugCache("fetch_start", {
+      endpoint,
+      inflightCount: inflightRequests.size + 1,
+      requestUrl,
+    });
+    const res = await fetchFastnearJson<T>({
+      url: requestUrl,
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: nearxHeaders,
+      body,
+      include_api_key: true,
     });
     if (!res.ok) {
       debugCache("fetch_error", {
         endpoint,
         status: res.status,
-        statusText: res.statusText,
+        responseText: res.text,
+        requestUrl: res.url,
       });
-      throw new Error(`API error ${res.status}: ${res.statusText}`);
+      throw new Error(`API error ${res.status}: ${res.text ?? "request failed"}`);
     }
 
-    const data = (await res.json()) as T;
+    if (res.body == null) {
+      throw new Error(`API error ${res.status}: empty JSON response`);
+    }
+
+    const data = res.body as T;
     writeCache(key, data, ttlMs);
     if (ttlMs > 0) {
       debugCache("store", { endpoint, ttlMs, cacheSize: responseCache.size });

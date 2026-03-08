@@ -36,7 +36,19 @@ pub(crate) fn fetch_onchain_access_keys(
         .map_err(|e| format!("create async runtime: {e}"))?;
 
     runtime.block_on(async move {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .default_headers({
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(
+                    "X-Nearx-Client",
+                    concat!("nearxd/", env!("CARGO_PKG_VERSION"))
+                        .parse()
+                        .unwrap(),
+                );
+                h
+            })
+            .build()
+            .expect("reqwest client");
         let resp = client
             .post(rpc_url)
             .header("content-type", "application/json")

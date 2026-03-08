@@ -38,3 +38,26 @@
   --color-green-600: oklch(0.68 0.17 145);
   --color-purple-700: oklch(0.70 0.16 295);
 }
+
+.dark input:not([type="checkbox"]):not([type="radio"]),
+.dark select,
+.dark textarea {
+  background-color: var(--color-gray-50);
+  color: var(--color-gray-900);
+  border-color: var(--color-gray-200);
+}
+
+.dark input:not([type="checkbox"]):not([type="radio"])::placeholder,
+.dark textarea::placeholder {
+  color: var(--color-gray-400);
+}
+
+.dark input:-webkit-autofill,
+.dark input:-webkit-autofill:hover,
+.dark input:-webkit-autofill:focus,
+.dark textarea:-webkit-autofill,
+.dark select:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--color-gray-50) inset;
+  -webkit-text-fill-color: var(--color-gray-900);
+  caret-color: var(--color-gray-900);
+}

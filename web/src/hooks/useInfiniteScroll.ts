@@ -56,6 +56,7 @@ export default function useInfiniteScroll<T>({
 
     fetchPage(undefined, batchSize)
       .then((result) => {
+        setError(null);
         if (result.totalCount > 0) setTotalCount(result.totalCount);
         setItems(result.items);
         resumeTokenRef.current = result.resumeToken;
@@ -80,6 +81,7 @@ export default function useInfiniteScroll<T>({
     fetchingRef.current = true;
     fetchPage(resumeTokenRef.current, batchSize)
       .then((result) => {
+        setError(null);
         if (result.totalCount > 0) setTotalCount(result.totalCount);
         bufferRef.current = result.items;
         resumeTokenRef.current = result.resumeToken;
@@ -134,9 +136,11 @@ export default function useInfiniteScroll<T>({
     // Fetch directly
     if (!resumeTokenRef.current) return;
     setLoadingMore(true);
+    setError(null);
     fetchingRef.current = true;
     fetchPage(resumeTokenRef.current, batchSize)
       .then((result) => {
+        setError(null);
         if (result.totalCount > 0) setTotalCount(result.totalCount);
         setItems((prev) => [...prev, ...result.items]);
         resumeTokenRef.current = result.resumeToken;

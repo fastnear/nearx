@@ -9,28 +9,34 @@ use serde_json::{json, Value};
 use std::env;
 use std::sync::{Arc, Mutex};
 
+use nearx_broker_ipc::BrokerEndpoint;
+
 use crate::config::{
     expand_tilde_path, near_credentials_dir, runtime_fastnear_api_url, runtime_near_node_url,
 };
 use crate::credentials::{
     collect_legacy_credentials, nearxd_credential_account_legacy, nearxd_keychain_has_credential,
-    normalize_source, read_near_cli_secure_credential, read_near_credential_keychain,
-    KEYCHAIN_NEAR_CREDENTIAL_SERVICE, SOURCE_HARDWARE_WALLET, SOURCE_LEGACY_FILE,
-    SOURCE_NEARXD_KEYCHAIN, SOURCE_NEAR_CLI_SECURE,
+    normalize_source, read_legacy_credential, read_near_cli_secure_credential,
+    read_near_credential_keychain, KEYCHAIN_NEAR_CREDENTIAL_SERVICE, SOURCE_HARDWARE_WALLET,
+    SOURCE_LEGACY_FILE, SOURCE_NEARXD_KEYCHAIN, SOURCE_NEAR_CLI_SECURE,
 };
 use crate::hardware_wallet::{
-    connect_hardware_wallet_result, hardware_wallet_sign_transaction,
+    connect_hardware_wallet_result, hardware_wallet_sign_transaction, hardware_wallet_supported,
     resolve_hardware_wallet_record,
 };
-use crate::keychain::keychain_has_generic;
+use crate::keychain::{
+    keychain_has_generic, secure_store_backend_name, secure_store_persistence_supported,
+};
 use crate::settings::HardwareWalletIndexRecord;
 use crate::settings::{
     add_staking_watchlist_account_result, list_staking_watchlist_result, load_signing_settings,
     persist_signing_settings, remove_staking_watchlist_account_result,
+    set_signing_key_label_result,
 };
 use crate::signing::{
     import_near_signing_keys_result, list_near_signing_accounts_result,
-    list_near_signing_keys_result, resolve_signing_credential,
+    list_near_signing_keys_result, nearxd_keychain_state_for_key,
+    reprotect_near_signing_key_result, resolve_signing_credential,
 };
 use crate::token::{build_token_store, TokenStore};
 use crate::user_presence::{
@@ -249,6 +255,35 @@ pub(crate) fn cleanup_expired_intents(state: &BrokerState) {
     }
 }
 
+fn signing_transport() -> &'static str {
+    match BrokerEndpoint::from_env() {
+        BrokerEndpoint::Filesystem(_) => "unix_socket",
+        BrokerEndpoint::Namespaced(_) => "named_pipe",
+    }
+}
+
+fn signing_capabilities_result() -> Value {
+    let user_presence = probe_user_presence(true);
+    let supports_user_presence = user_presence
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let supports_hardware_wallet = hardware_wallet_supported();
+    let supports_secure_store = secure_store_persistence_supported();
+
+    json!({
+        "platform": env::consts::OS,
+        "transport": signing_transport(),
+        "secure_store_backend": secure_store_backend_name(),
+        "supports_legacy_import": supports_secure_store,
+        "supports_near_cli_secure": supports_secure_store,
+        "supports_secure_store_persistence": supports_secure_store,
+        "supports_user_presence": supports_user_presence,
+        "supports_hardware_wallet_connect": supports_hardware_wallet,
+        "supports_hardware_wallet_sign": supports_hardware_wallet,
+    })
+}
+
 pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> BrokerResponse {
     let id = id_or_default(req.id);
 
@@ -412,6 +447,8 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
             }
         }
 
+        "get_signing_capabilities" => BrokerResponse::ok(id, signing_capabilities_result()),
+
         "get_signing_settings" => {
             let (settings, source) = load_signing_settings();
             BrokerResponse::ok(
@@ -459,6 +496,11 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
             }
         }
 
+        "set_signing_key_label" => match set_signing_key_label_result(&req.params) {
+            Ok(v) => BrokerResponse::ok(id, v),
+            Err((code, msg)) => BrokerResponse::err(id, code, msg),
+        },
+
         "connect_hardware_wallet" => match connect_hardware_wallet_result(&req.params) {
             Ok(v) => BrokerResponse::ok(id, v),
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
@@ -475,6 +517,11 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
         },
 
         "import_near_signing_keys" => match import_near_signing_keys_result(&req.params, None) {
+            Ok(v) => BrokerResponse::ok(id, v),
+            Err((code, msg)) => BrokerResponse::err(id, code, msg),
+        },
+
+        "reprotect_near_signing_key" => match reprotect_near_signing_key_result(&req.params) {
             Ok(v) => BrokerResponse::ok(id, v),
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
         },
@@ -572,6 +619,21 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                 .unwrap_or(SOURCE_NEARXD_KEYCHAIN);
 
             let result = match source {
+                SOURCE_LEGACY_FILE => {
+                    let Some(credentials_dir) = near_credentials_dir(&network) else {
+                        return BrokerResponse::err(
+                            id,
+                            "ERR_IO",
+                            "unable to resolve credentials_dir".to_string(),
+                        );
+                    };
+                    read_legacy_credential(
+                        &credentials_dir,
+                        &network,
+                        account_id,
+                        signer_public_key,
+                    )
+                }
                 SOURCE_NEAR_CLI_SECURE => {
                     let Some(public_key) = signer_public_key else {
                         return BrokerResponse::err(
@@ -597,7 +659,7 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                     }),
                 ),
                 Err(e) => {
-                    let code = if !cfg!(target_os = "macos") {
+                    let code = if !secure_store_persistence_supported() {
                         "ERR_UNAVAILABLE"
                     } else {
                         "ERR_AUTH"
@@ -901,7 +963,7 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                 Err(e) => return BrokerResponse::err(id, "ERR_PARAMS", e),
             };
 
-            // Resolve credential from nearxd keychain and/or near-cli secure keychain.
+            // Resolve credential from local file, OS secret storage, secure storage, or hardware.
             let network = parse_string(&req.params, "network")
                 .unwrap_or("mainnet")
                 .to_ascii_lowercase();
@@ -1000,6 +1062,28 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                     _ => parsed_secret.public_key(),
                 };
                 secret_key = Some(parsed_secret);
+            }
+
+            if credential_source.as_deref() == Some(SOURCE_NEARXD_KEYCHAIN) {
+                let (keychain_protection, import_required) = nearxd_keychain_state_for_key(
+                    load_signing_settings().0.as_ref(),
+                    &network,
+                    signer_id_str,
+                    &public_key.to_string(),
+                );
+                if import_required {
+                    let protection_label = keychain_protection.unwrap_or_else(|| "unknown".to_string());
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_IMPORT_REQUIRED",
+                        format!(
+                            "Keychain signing for {} / {} requires biometric protection. Current Keychain protection is '{}'. Import or repair the Keychain copy, or choose File system / OS secrets instead.",
+                            signer_id_str,
+                            public_key,
+                            protection_label,
+                        ),
+                    );
+                }
             }
 
             // Build transaction

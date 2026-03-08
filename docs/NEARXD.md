@@ -1,7 +1,7 @@
 # nearxd Local Broker Daemon
 
-Status: Active (Phase 3 user-presence and credential import)  
-Last Updated: 2026-02-26
+Status: Active (Phase 5 staking watchlist + Ledger beta)  
+Last Updated: 2026-03-08
 
 `nearxd` is the local broker/control-plane process for NEARx desktop integrations.
 
@@ -56,9 +56,20 @@ User-presence and signing settings:
 
 Credential discovery and import:
 
+- `list_near_signing_accounts`
+- `list_near_signing_keys`
+- `import_near_signing_keys`
+- `reprotect_near_signing_key`
 - `list_near_credentials`
 - `import_near_credentials`
 - `get_near_credential`
+
+Staking watchlist + hardware wallets:
+
+- `list_staking_watchlist`
+- `add_staking_watchlist_account`
+- `remove_staking_watchlist_account`
+- `connect_hardware_wallet`
 
 Sign intent:
 
@@ -99,8 +110,10 @@ File paths:
 Keychain services (macOS):
 
 - `nearxd.fastnear.auth` (account: `fastnear_auth_token`)
-- `nearxd.near.credentials` (account namespace: `<network>:<account_id>`)
+- `nearxd.near.credentials` (account namespace: `<network>:<account_id>:<public_key>`, with backward read support for `<network>:<account_id>`)
 - `nearxd.signing.settings` (account: `default`)
+
+For NEAR signer credentials on macOS, NEARx now tracks whether a nearxd Keychain item is verified biometric (`biometry_current_set`) versus legacy/unknown. Importing into Keychain is additive only and does not remove the original file-system or near-cli secure source.
 
 ## User-Presence Adapter
 
@@ -194,9 +207,107 @@ Output:
 }
 ```
 
-### `list_near_credentials`
+Additional signing-settings sections used by staking/hardware flows:
 
-Lists available credential accounts from `~/.near-credentials/<network>` (or custom dir). Returns account IDs and public keys only — never exposes private keys. Returns an empty accounts array (not an error) when the directory does not exist or contains no parseable credentials.
+- `staking_watchlist`
+  - `version`
+  - `entries[]`: `{ network, account_id, added_at_ms, source }`
+- `hardware_wallet_index`
+  - `version`
+  - `records[]`: `{ network, account_id, public_key, wallet_type, derivation_path, last_seen_at_ms }`
+
+### `list_near_signing_accounts`
+
+Lists signer accounts discoverable from:
+
+- legacy credentials under `credentials_home_dir/<network>`
+- near-cli secure account history (`accounts.json`)
+- nearxd signing settings key index
+
+Input:
+
+```json
+{
+  "network": "mainnet",
+  "credentials_home_dir": "~/.near-credentials"
+}
+```
+
+`credentials_home_dir` defaults to near-cli config (`~/Library/Application Support/near-cli/config.toml` on macOS) and falls back to `~/.near-credentials`.
+
+### `list_near_signing_keys`
+
+Lists signer keys per account with permission summary, curve, and source availability.
+
+Output rows include:
+
+- `account_id`
+- `public_key`
+- `curve_type` (`ed25519`, `secp256k1`, `unknown`)
+- `permission` (`full_access`, `function_call`, `unknown`)
+- `available_sources` (`nearxd_keychain`, `near_cli_secure`, `legacy_file`, `hardware_wallet`)
+- `preferred_source`
+- `in_nearxd_keychain`
+- `nearxd_keychain_protection` (`biometry_current_set`, `user_presence`, `unprotected`, `unknown`, or `null`)
+- `nearxd_keychain_import_required`
+- `importable`
+- `last_seen_at_ms`
+- `stale`
+
+When RPC key discovery is unavailable, nearxd falls back to secure-keychain account enumeration for `near_cli_secure` keys on macOS.
+
+On macOS, `nearxd_keychain_import_required=true` means the key has a nearxd Keychain copy but NEARx does not yet consider that copy verified for biometric signing.
+
+In local ad-hoc or otherwise unsigned macOS builds, fingerprint-protected Keychain writes may fall back to unprotected Keychain storage. When that happens, NEARx should keep weaker local sources such as `legacy_file` or `near_cli_secure` available and prefer them over reopening the signer on blocked `nearxd_keychain`.
+
+### `import_near_signing_keys`
+
+Imports keys at key-level scope from one or more sources (`legacy_file`, `near_cli_secure`) into nearxd keychain and updates signing key index metadata.
+
+Import is additive: original `legacy_file` and `near_cli_secure` sources remain intact and continue to appear in `available_sources`.
+
+Supports optional filters:
+
+- `account_id`
+- `public_key`
+- `source` / `sources`
+
+Optional protection-related request fields:
+
+- `keychain_credential_protection`
+- `allow_fallback`
+- `overwrite`
+
+Per-row response fields include:
+
+- `keychain_status`
+- `keychain_protection`
+- `storage_backend`
+
+On macOS, if a protected write falls back to an unprotected Keychain write, the response reports `keychain_protection=unprotected` and later `list_near_signing_keys` will surface `nearxd_keychain_import_required=true`.
+
+Fingerprint-signing QA for macOS must be run against a real signed app bundle and signed `nearxd` sidecar, not ad-hoc `target/debug` binaries.
+
+### `reprotect_near_signing_key`
+
+Repairs an existing nearxd Keychain credential in place so it is re-written with biometric Keychain protection on macOS.
+
+Input:
+
+```json
+{
+  "network": "mainnet",
+  "account_id": "alice.near",
+  "public_key": "ed25519:...",
+  "reason": "Optional prompt reason"
+}
+```
+
+Response fields include `keychain_status`, `keychain_protection`, and `storage_backend`.
+
+### `list_near_credentials` (compatibility wrapper)
+
+Legacy compatibility wrapper for callers expecting legacy-file credential listing. Internally uses the new discovery path but preserves old response shape.
 
 Input:
 
@@ -223,9 +334,79 @@ Output:
 }
 ```
 
-### `import_near_credentials`
+### `import_near_credentials` (compatibility wrapper)
 
-Imports credentials from `~/.near-credentials/<network>` (or custom dir), optionally requiring user presence and persisting keys to keychain.
+Legacy compatibility wrapper that maps to `import_near_signing_keys` with source restricted to `legacy_file`.
+
+### `list_staking_watchlist`
+
+Lists monitored staking accounts for a network from signing settings.
+
+Input:
+
+```json
+{
+  "network": "testnet"
+}
+```
+
+Output:
+
+```json
+{
+  "network": "testnet",
+  "entries": [
+    {
+      "network": "testnet",
+      "account_id": "alice.testnet",
+      "added_at_ms": 1762400000000,
+      "source": "manual"
+    }
+  ]
+}
+```
+
+### `add_staking_watchlist_account` / `remove_staking_watchlist_account`
+
+`add_staking_watchlist_account` validates account ID format (including implicit IDs), upserts an entry, and persists settings.
+
+`remove_staking_watchlist_account` removes one account entry for the given network.
+
+Input:
+
+```json
+{
+  "network": "testnet",
+  "account_id": "alice.testnet",
+  "source": "manual",
+  "prefer_keychain": false
+}
+```
+
+`source` is `manual` or `seeded` (default: `manual`).
+
+### `connect_hardware_wallet`
+
+Connects a hardware wallet key for a specific account (Ledger Beta, macOS-first):
+
+1. fetch public key from device for derivation path
+2. validate that key exists on-chain for selected account
+3. persist record to `hardware_wallet_index`
+4. update signing key index with `hardware_wallet` source
+
+Input:
+
+```json
+{
+  "network": "testnet",
+  "wallet_type": "ledger",
+  "account_id": "alice.testnet",
+  "derivation_path": "44'/397'/0'/0'/1'",
+  "display_confirm": true
+}
+```
+
+Output includes the connected key as a signing-key row shape plus `derivation_path`.
 
 Input:
 
@@ -255,7 +436,7 @@ Output (shape):
       "account_id": "alice.testnet",
       "public_key": "ed25519:...",
       "file": ".../alice.testnet.json",
-      "keychain_account": "testnet:alice.testnet",
+      "keychain_account": "testnet:alice.testnet:ed25519:...",
       "keychain_status": "stored"
     }
   ],
@@ -295,6 +476,8 @@ Input:
 }
 ```
 
+If `public_key` is provided and nearxd falls back to legacy account-scoped keychain storage, nearxd enforces strict key matching and rejects mismatches.
+
 Output (shape):
 
 ```json
@@ -306,7 +489,7 @@ Output (shape):
     "account_id": "alice.testnet",
     "public_key": "ed25519:...",
     "private_key": "ed25519:...",
-    "keychain_account": "testnet:alice.testnet"
+    "keychain_account": "testnet:alice.testnet:ed25519:..."
   }
 }
 ```
@@ -322,19 +505,43 @@ When enabled, `approve_sign_intent` performs user-presence verification before s
 
 ### `sign_transaction`
 
-Signs a NEAR transaction using a credential stored in the macOS keychain (triggers Touch ID).
+Signs a NEAR transaction using a credential source selected from:
+
+- `nearxd_keychain`
+- `near_cli_secure`
+- `legacy_file`
+- `hardware_wallet`
+
+`sign_transaction` accepts optional key/source selectors:
+
+- `signer_public_key`
+- `credential_source`
+
+Source resolution defaults to:
+
+1. `nearxd_keychain`
+2. `near_cli_secure`
+3. fail with import recommendation
+
+When `credential_source=hardware_wallet`, `signer_public_key` is required and nearxd signs with the indexed hardware wallet record only (no automatic source fallback).
+
+On macOS, when `credential_source=nearxd_keychain` is sent explicitly, nearxd rejects the request with `ERR_IMPORT_REQUIRED` unless that key's indexed `nearxd_keychain_protection` is `biometry_current_set`.
+
+Response includes `credential_source` with the source actually used.
 
 Request params:
 
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `signer_id` | string | yes | NEAR account ID of the signer |
+| `signer_public_key` | string | no* | Explicit signer key (`required` for `credential_source=hardware_wallet`) |
+| `credential_source` | string | no | `nearxd_keychain`, `near_cli_secure`, `legacy_file`, or `hardware_wallet` |
 | `receiver_id` | string | yes | NEAR account ID of the receiver |
 | `nonce` | u64 | yes | Access key nonce (typically `current_nonce + 1`) |
 | `block_hash` | string | yes | Recent block hash (base58) |
 | `actions` | array | yes | Array of action objects (see below) |
 | `network` | string | no | `"mainnet"` or `"testnet"` (default: `"mainnet"`) |
-| `reason` | string | no | Touch ID prompt reason |
+| `reason` | string | no | Optional signing context/prompt reason (used by interactive credential sources when applicable) |
 
 Action types:
 
@@ -353,6 +560,16 @@ Response:
 ```
 
 The `signed_transaction_base64` is borsh-serialized, ready for `broadcast_tx_commit`.
+
+Hardware-specific failures use explicit error codes from broker responses:
+
+- `ERR_HARDWARE_UNAVAILABLE`
+- `ERR_HARDWARE_APP_NOT_OPEN`
+- `ERR_HARDWARE_USER_REJECTED`
+- `ERR_HARDWARE_KEY_NOT_ON_ACCOUNT`
+- `ERR_HARDWARE_INVALID_PATH`
+- `ERR_HARDWARE_TRANSPORT`
+- `ERR_UNAVAILABLE`
 
 ## Native Host and Tauri Integration
 

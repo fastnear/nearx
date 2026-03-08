@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 pub(crate) fn home_dir() -> Option<PathBuf> {
     env::var("HOME")
         .ok()
+        .or_else(|| env::var("USERPROFILE").ok())
+        .or_else(|| {
+            let drive = env::var("HOMEDRIVE").ok()?;
+            let path = env::var("HOMEPATH").ok()?;
+            Some(format!("{drive}{path}"))
+        })
         .map(|h| PathBuf::from(h.trim()))
         .filter(|p| !p.as_os_str().is_empty())
 }
@@ -38,20 +44,38 @@ pub(crate) struct NearCliUsedAccount {
     pub used_as_signer: bool,
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn near_cli_config_path() -> Option<PathBuf> {
-    let home = home_dir()?;
-    Some(
-        home.join("Library")
-            .join("Application Support")
-            .join("near-cli")
-            .join("config.toml"),
-    )
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    if let Ok(raw) = env::var("XDG_CONFIG_HOME") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Some(home_dir()?.join("Library").join("Application Support"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = env::var("APPDATA") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+        return Some(home_dir()?.join("AppData").join("Roaming"));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Some(home_dir()?.join(".config"))
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
 pub(crate) fn near_cli_config_path() -> Option<PathBuf> {
-    None
+    Some(config_dir()?.join("near-cli").join("config.toml"))
 }
 
 pub(crate) fn near_credentials_home_dir() -> Option<PathBuf> {

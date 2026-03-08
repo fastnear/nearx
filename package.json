@@ -8,6 +8,8 @@
     "e2e-tests"
   ],
   "scripts": {
+    "build:sidecar": "node tools/build-sidecar.mjs",
+    "build:macos-qa": "tools/build-macos-qa.sh",
     "e2e:install": "npx playwright install --with-deps",
     "e2e": "playwright test",
     "e2e:web": "NEARX_BASE_URL=http://127.0.0.1:8083 playwright test",

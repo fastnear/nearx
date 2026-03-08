@@ -34,9 +34,9 @@ export default function AccountId({
   const needsTruncate = auto || accountId.length > maxLength;
 
   const truncateCls = auto
-    ? "font-mono text-xs inline-block min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap align-bottom"
-    : "font-mono text-xs inline-block overflow-hidden text-ellipsis whitespace-nowrap align-bottom";
-  const normalCls = "font-mono text-xs whitespace-nowrap";
+    ? "font-mono text-sm inline-block min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap align-bottom"
+    : "font-mono text-sm inline-block overflow-hidden text-ellipsis whitespace-nowrap align-bottom";
+  const normalCls = "font-mono text-sm whitespace-nowrap";
   const innerCls = needsTruncate ? truncateCls : normalCls;
   const maxWidthStyle = needsTruncate && !auto ? { maxWidth: `${maxLength + 6}ch` } : undefined;
 

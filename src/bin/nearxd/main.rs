@@ -28,18 +28,9 @@ use std::sync::Arc;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    #[cfg(unix)]
-    {
-        let state = Arc::new(broker::BrokerState::default());
-        if let Err(e) = socket::run_unix(state) {
-            eprintln!("nearxd failed: {e}");
-            std::process::exit(1);
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        eprintln!("nearxd currently supports Unix-domain sockets only");
+    let state = Arc::new(broker::BrokerState::default());
+    if let Err(e) = socket::run(state) {
+        eprintln!("nearxd failed: {e}");
         std::process::exit(1);
     }
 }
