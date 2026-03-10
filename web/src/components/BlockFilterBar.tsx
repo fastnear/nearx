@@ -2,6 +2,9 @@ import { useState } from "react";
 import type { BlockFilters } from "../api/types";
 import { SlidersHorizontal, X } from "lucide-react";
 
+const compactInputClass =
+  "w-36 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none";
+
 export default function BlockFilterBar({
   filters,
   onChange,
@@ -87,7 +90,7 @@ export default function BlockFilterBar({
               onKeyDown={(e) => {
                 if (e.key === "Enter") (e.target as HTMLInputElement).blur();
               }}
-              className="w-36 rounded border border-gray-200 bg-white px-2 py-1 text-xs focus:border-blue-300 focus:outline-none"
+              className={compactInputClass}
             />
             <span className="text-xs text-gray-400">to</span>
             <input
@@ -98,7 +101,7 @@ export default function BlockFilterBar({
               onKeyDown={(e) => {
                 if (e.key === "Enter") (e.target as HTMLInputElement).blur();
               }}
-              className="w-36 rounded border border-gray-200 bg-white px-2 py-1 text-xs focus:border-blue-300 focus:outline-none"
+              className={compactInputClass}
             />
           </div>
         </div>

@@ -17,6 +17,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -37,6 +40,41 @@ jobs:
 
       - name: Check native-host
         run: cargo check --manifest-path native-host/Cargo.toml
+
+  desktop-checks:
+    name: Desktop Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libwebkit2gtk-4.1-dev librsvg2-dev patchelf
+
+      - name: Test nearxd
+        run: cargo test -p nearx --bin nearxd
+
+      - name: Check Tauri host
+        run: cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml
+
+      - name: Check native-host
+        run: cargo check --manifest-path native-host/Cargo.toml
+
+      - name: Verify sidecar bundling helper
+        run: node tools/build-sidecar.mjs
 
   web-typecheck-build:
     name: Web Typecheck & Build

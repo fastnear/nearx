@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://accounts.google.com https://oauth2.googleapis.com https://rpc.mainnet.near.org https://rpc.testnet.near.org https://rpc.mainnet.fastnear.com https://rpc.testnet.fastnear.com https://archival-rpc.mainnet.fastnear.com https://archival-rpc.testnet.fastnear.com https://*.near.org http://localhost:* ws: wss:; font-src 'self'; base-uri 'none'; frame-ancestors 'none';",
+      "csp": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://accounts.google.com https://oauth2.googleapis.com https://rpc.mainnet.near.org https://rpc.testnet.near.org https://rpc.mainnet.fastnear.com https://rpc.testnet.fastnear.com https://archival-rpc.mainnet.fastnear.com https://archival-rpc.testnet.fastnear.com https://tx.main.fastnear.com https://tx.test.fastnear.com https://api.fastnear.com https://test.api.fastnear.com https://*.near.org http://localhost:* ws: wss:; font-src 'self'; base-uri 'none'; frame-ancestors 'none';",
       "capabilities": ["main-capability"]
     }
   },

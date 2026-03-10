@@ -1,0 +1,7 @@
+[package]
+name = "nearx-broker-ipc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+interprocess = "2.4.0"

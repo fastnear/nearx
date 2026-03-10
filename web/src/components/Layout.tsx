@@ -2,13 +2,14 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import SearchBar from "./SearchBar";
 import Sidebar from "./Sidebar";
-import { ChevronDown, Sun, Moon, Monitor, Fingerprint } from "lucide-react";
+import { ChevronDown, Sun, Moon } from "lucide-react";
 import { networkId, otherNetworkId } from "../config";
 import { buildCrossNetworkUrl } from "../utils/networkRouting";
-import { isTauriRuntime, requestUserPresence } from "../tauri/runtime";
-import type { UserPresenceResult } from "../tauri/runtime";
+import { isTauriRuntime } from "../tauri/runtime";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import logoSvg from "../assets/logo.svg";
+import BackForwardControls from "./BackForwardControls";
+import { RouteHistoryProvider } from "../hooks/useRouteHistory";
 
 function NetworkSwitcher({ switchUrl }: { switchUrl: string }) {
   const [open, setOpen] = useState(false);
@@ -27,19 +28,19 @@ function NetworkSwitcher({ switchUrl }: { switchUrl: string }) {
     <div className="relative" ref={ref}>
       <button
         onClick={(e) => { e.preventDefault(); setOpen(!open); }}
-        className="flex items-center gap-0.5 rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600 uppercase cursor-pointer hover:bg-gray-200"
+        className="flex cursor-pointer items-center gap-1 rounded bg-gray-100 px-2.5 py-1 text-sm font-medium uppercase text-gray-600 hover:bg-gray-200"
       >
         {networkId}
         <ChevronDown className="size-3" />
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-1 rounded border border-gray-200 bg-surface text-xs font-medium uppercase shadow-md z-10">
-          <span className="block px-3 py-1.5 text-gray-900 whitespace-nowrap">
+        <div className="absolute left-0 top-full z-10 mt-1 rounded border border-gray-200 bg-surface text-sm font-medium uppercase shadow-md">
+          <span className="block whitespace-nowrap px-3 py-2 text-gray-900">
             {networkId} ✓
           </span>
           <a
             href={switchUrl}
-            className="block px-3 py-1.5 text-gray-500 hover:bg-gray-50 whitespace-nowrap"
+            className="block whitespace-nowrap px-3 py-2 text-gray-500 hover:bg-gray-50"
           >
             {otherNetworkId}
           </a>
@@ -64,11 +65,33 @@ function applyTheme(theme: Theme) {
   document.documentElement.classList.toggle("dark", isDark);
 }
 
-const themeIcon: Record<Theme, typeof Sun> = { light: Sun, dark: Moon, system: Monitor };
 const themeLabel: Record<Theme, string> = { light: "Light", dark: "Dark", system: "System" };
+
+function useEffectiveTheme(theme: Theme): "light" | "dark" {
+  const [effective, setEffective] = useState<"light" | "dark">(() =>
+    theme === "system"
+      ? matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+      : theme
+  );
+
+  useEffect(() => {
+    if (theme !== "system") {
+      setEffective(theme);
+      return;
+    }
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    setEffective(mq.matches ? "dark" : "light");
+    const handler = () => setEffective(mq.matches ? "dark" : "light");
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [theme]);
+
+  return effective;
+}
 
 function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>(getStoredTheme);
+  const effective = useEffectiveTheme(theme);
 
   useEffect(() => {
     if (theme === "system") {
@@ -97,60 +120,21 @@ function ThemeToggle() {
     });
   }, []);
 
-  const Icon = themeIcon[theme];
+  const Icon = effective === "dark" ? Sun : Moon;
 
   return (
     <button
       onClick={cycle}
-      className="flex items-center justify-center rounded bg-gray-100 p-1.5 text-gray-600 cursor-pointer hover:bg-gray-200"
+      className="flex cursor-pointer items-center justify-center rounded bg-gray-100 p-2 text-gray-600 hover:bg-gray-200"
       title={`Theme: ${themeLabel[theme]}`}
     >
-      <Icon className="size-3.5" />
-    </button>
-  );
-}
-
-function FingerprintButton() {
-  const [state, setState] = useState<"idle" | "pending" | "verified" | "denied">("idle");
-
-  const handleClick = useCallback(async () => {
-    console.log("[FingerprintButton] clicked, calling requestUserPresence...");
-    setState("pending");
-    try {
-      const result: UserPresenceResult = await requestUserPresence("NEARx fingerprint test");
-      console.log("[FingerprintButton] result:", JSON.stringify(result));
-      setState(result.verified ? "verified" : "denied");
-    } catch (err) {
-      console.error("[FingerprintButton] error:", err);
-      setState("denied");
-    }
-    setTimeout(() => setState("idle"), 2000);
-  }, []);
-
-  const color =
-    state === "verified" ? "text-green-600" :
-    state === "denied" ? "text-red-500" :
-    state === "pending" ? "text-yellow-500 animate-pulse" :
-    "text-gray-600";
-
-  return (
-    <button
-      onClick={handleClick}
-      disabled={state === "pending"}
-      className={`flex items-center justify-center rounded bg-gray-100 p-1.5 cursor-pointer hover:bg-gray-200 ${color}`}
-      title={
-        state === "verified" ? "Verified" :
-        state === "denied" ? "Denied" :
-        state === "pending" ? "Waiting..." :
-        "Test Touch ID"
-      }
-    >
-      <Fingerprint className="size-3.5" />
+      <Icon className="size-4" />
     </button>
   );
 }
 
 function getPageTitle(pathname: string): string {
+  if (pathname.startsWith("/settings")) return "NEARx — Settings";
   if (pathname.startsWith("/staking")) return "NEARx — Staking";
   if (pathname.startsWith("/sign")) return "NEARx — Sign Transaction";
   if (pathname.startsWith("/tx/")) return "NEARx — Transaction";
@@ -182,34 +166,36 @@ export default function Layout() {
   }, [location.pathname]);
 
   return (
-    <div className="flex flex-col min-h-screen bg-gray-50 text-gray-900">
-      <header className="border-b border-gray-200 bg-surface">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 sm:gap-4 px-4 py-3">
-          <Link to="/" className="flex items-center gap-2 font-bold text-lg whitespace-nowrap">
-            <img src={logoSvg} alt="" width="24" height="18" />
-            NEAR Rocks
-          </Link>
-          <NetworkSwitcher switchUrl={switchUrl} />
-          <ThemeToggle />
-          {isTauriRuntime() && <FingerprintButton />}
-          <div className="w-full sm:w-auto sm:flex-1 order-last sm:order-none">
-            <SearchBar />
+    <RouteHistoryProvider>
+      <div className="flex min-h-screen flex-col bg-gray-50 text-gray-900">
+        <header className="border-b border-gray-200 bg-surface">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-3.5 sm:gap-4">
+            <Link to="/" className="flex items-center gap-2 whitespace-nowrap text-xl font-bold">
+              <img src={logoSvg} alt="" width="24" height="18" />
+              NEARx
+            </Link>
+            <BackForwardControls />
+            <NetworkSwitcher switchUrl={switchUrl} />
+            <div className="order-last w-full sm:order-none sm:flex-1">
+              <SearchBar />
+            </div>
+            <ThemeToggle />
+          </div>
+        </header>
+
+        <div className="flex flex-1">
+          <Sidebar />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <main className="mx-auto w-full max-w-6xl px-4 py-6">
+              <Outlet />
+            </main>
+
+            <footer className="mt-auto border-t border-gray-200 py-4 text-center text-sm text-gray-500">
+              <Link to="/" className="text-blue-600 hover:underline">NEARx</Link> &middot; <a href="https://fastnear.com" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">FastNEAR</a> &middot; <a href="https://tx.main.fastnear.com/" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">TX API</a> &middot; <a href="https://github.com/fastnear/explorer-frontend" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">GitHub</a> &middot; <a href="https://t.me/fast_near" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">Feedback</a> &middot; <a href="https://x.com/fast_near" className="inline-block align-middle text-blue-600 hover:underline relative -top-px" target="_blank" rel="noopener noreferrer" title="@fast_near on X"><svg className="size-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" /></svg></a>
+            </footer>
           </div>
         </div>
-      </header>
-
-      <div className="flex flex-1">
-        <Sidebar />
-        <div className="flex-1 flex flex-col min-w-0">
-          <main className="mx-auto w-full max-w-6xl px-4 py-6">
-            <Outlet />
-          </main>
-
-          <footer className="mt-auto border-t border-gray-200 py-4 text-center text-sm text-gray-500">
-            <Link to="/" className="text-blue-600 hover:underline">NEAR Rocks</Link> &middot; <a href="https://fastnear.com" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">FastNEAR</a> &middot; <a href="https://tx.main.fastnear.com/" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">TX API</a> &middot; <a href="https://github.com/fastnear/explorer-frontend" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">GitHub</a> &middot; <a href="https://t.me/fast_near" className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">Feedback</a> &middot; <a href="https://x.com/fast_near" className="inline-block align-middle text-blue-600 hover:underline relative -top-px" target="_blank" rel="noopener noreferrer" title="@fast_near on X"><svg className="size-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" /></svg></a>
-          </footer>
-        </div>
       </div>
-    </div>
+    </RouteHistoryProvider>
   );
 }

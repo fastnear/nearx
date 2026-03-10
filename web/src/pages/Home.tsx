@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { getBlocks } from "../api/endpoints";
 import type { BlockHeader } from "../api/types";
 import useInfiniteScroll from "../hooks/useInfiniteScroll";
@@ -13,6 +14,7 @@ const BATCH_SIZE = 80;
 const LIVE_POLL_INTERVAL_MS = 999;
 const LIVE_POLL_LIMIT = 24;
 const MAX_LIVE_HEAD_BLOCKS = 240;
+const DEV = import.meta.env.DEV;
 
 function dedupeByHeight(blocks: BlockHeader[]): BlockHeader[] {
   const seen = new Set<number>();
@@ -31,8 +33,10 @@ function dedupeByHeight(blocks: BlockHeader[]): BlockHeader[] {
 }
 
 export default function Home() {
+  const { pathname } = useLocation();
   const { filters, setFilters, filterKey, hasActiveFilters } = useBlockFilters();
   const isDesc = filters.desc !== false;
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   const fetchPage = useCallback(
     async (resumeToken?: string, limit?: number) => {
@@ -87,15 +91,15 @@ export default function Home() {
   } = useInfiniteScroll<BlockHeader>({
     fetchPage,
     batchSize: BATCH_SIZE,
-    key: `blocks:${filterKey}`,
+    key: `blocks:${filterKey}:${reloadNonce}`,
   });
 
   const [liveHeadBlocks, setLiveHeadBlocks] = useState<BlockHeader[]>([]);
-  const liveUpdatesEnabled = isDesc && !hasActiveFilters;
+  const liveUpdatesEnabled = pathname === "/" && isDesc && !hasActiveFilters;
 
   useEffect(() => {
     setLiveHeadBlocks([]);
-  }, [filterKey]);
+  }, [filterKey, reloadNonce]);
 
   const renderedBlocks = useMemo(
     () => dedupeByHeight([...liveHeadBlocks, ...blocks]),
@@ -106,6 +110,12 @@ export default function Home() {
   useEffect(() => {
     topRenderedHeightRef.current = renderedBlocks[0]?.block_height ?? null;
   }, [renderedBlocks]);
+
+  useEffect(() => {
+    if (error && DEV) {
+      console.error("[Home] failed to load blocks", error);
+    }
+  }, [error]);
 
   const pollForHeadUpdates = useCallback(async (opts?: { force?: boolean }) => {
     if (!liveUpdatesEnabled) {
@@ -165,93 +175,127 @@ export default function Home() {
     };
   }, [liveUpdatesEnabled, pollForHeadUpdates]);
 
-  if (error) {
-    return <p className="text-red-600">Error loading blocks: {error}</p>;
-  }
+  const showExplorerErrorCard = Boolean(error) && !loading && renderedBlocks.length === 0;
+  const showExplorerErrorBanner = Boolean(error) && renderedBlocks.length > 0;
 
   return (
     <div>
       <h1 className="mb-4 text-xl font-bold">Latest Blocks</h1>
-      {/* Desktop table */}
-      <div className="hidden sm:block overflow-x-auto rounded-lg border border-gray-200 bg-surface">
-        <BlockFilterBar
-          filters={filters}
-          onChange={setFilters}
-          hasActiveFilters={hasActiveFilters}
-        />
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 bg-gray-50 text-left text-xs font-medium uppercase text-gray-500">
-              <th className="px-4 py-3">Height</th>
-              <th className="px-4 py-3">Time</th>
-              <th className="px-4 py-3">Author</th>
-              <th className="px-4 py-3 text-right">Txns</th>
-              <th className="px-4 py-3 text-right">Receipts</th>
-              <th className="px-4 py-3 text-right">Gas Used</th>
-            </tr>
-          </thead>
-          <tbody>
+      {showExplorerErrorCard && (
+        <div className="rounded-lg border border-gray-200 bg-surface px-4 py-6 text-center">
+          <div className="text-sm font-medium text-gray-800">
+            Latest blocks are temporarily unavailable.
+          </div>
+          <div className="mt-1 text-sm text-gray-500">
+            Check your connection or try loading the explorer again.
+          </div>
+          <button
+            type="button"
+            onClick={() => setReloadNonce((prev) => prev + 1)}
+            className="mt-4 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {showExplorerErrorBanner && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-surface px-4 py-2.5 text-sm">
+          <span className="text-gray-600">
+            Some block data could not be refreshed. Showing the latest successful results.
+          </span>
+          <button
+            type="button"
+            onClick={() => setReloadNonce((prev) => prev + 1)}
+            className="shrink-0 rounded border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!showExplorerErrorCard && (
+        <>
+          {/* Desktop table */}
+          <div className="hidden sm:block overflow-x-auto rounded-lg border border-gray-200 bg-surface">
+            <BlockFilterBar
+              filters={filters}
+              onChange={setFilters}
+              hasActiveFilters={hasActiveFilters}
+            />
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 bg-gray-50 text-left text-xs font-medium uppercase text-gray-500">
+                  <th className="px-4 py-3">Height</th>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Author</th>
+                  <th className="px-4 py-3 text-right">Txns</th>
+                  <th className="px-4 py-3 text-right">Receipts</th>
+                  <th className="px-4 py-3 text-right">Gas Used</th>
+                </tr>
+              </thead>
+              <tbody>
+                {renderedBlocks.map((b) => (
+                  <tr
+                    key={b.block_height}
+                    className="border-b border-gray-100 hover:bg-gray-50"
+                  >
+                    <td className="px-4 py-3">
+                      <span className="font-medium">
+                        <BlockHeight height={b.block_height} />
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-500">
+                      <TimeAgo timestampNs={b.block_timestamp} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <AccountId accountId={b.author_id} />
+                    </td>
+                    <td className="px-4 py-3 text-right">{b.num_transactions}</td>
+                    <td className="px-4 py-3 text-right">{b.num_receipts}</td>
+                    <td className="px-4 py-3 text-right">
+                      {(Number(b.gas_burnt) / 1e12).toFixed(2)} Tgas
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* Mobile cards */}
+          <div className="sm:hidden rounded-lg border border-gray-200 bg-surface divide-y divide-gray-100">
+            <BlockFilterBar
+              filters={filters}
+              onChange={setFilters}
+              hasActiveFilters={hasActiveFilters}
+            />
             {renderedBlocks.map((b) => (
-              <tr
-                key={b.block_height}
-                className="border-b border-gray-100 hover:bg-gray-50"
-              >
-                <td className="px-4 py-3">
-                  <span className="font-medium">
+              <div key={b.block_height} className="px-3 py-2.5">
+                <div className="flex items-center justify-between gap-2 mb-0.5">
+                  <span className="font-medium text-sm">
                     <BlockHeight height={b.block_height} />
                   </span>
-                </td>
-                <td className="px-4 py-3 text-gray-500">
-                  <TimeAgo timestampNs={b.block_timestamp} />
-                </td>
-                <td className="px-4 py-3">
+                  <span className="text-xs text-gray-500 shrink-0">
+                    <TimeAgo timestampNs={b.block_timestamp} />
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
                   <AccountId accountId={b.author_id} />
-                </td>
-                <td className="px-4 py-3 text-right">{b.num_transactions}</td>
-                <td className="px-4 py-3 text-right">{b.num_receipts}</td>
-                <td className="px-4 py-3 text-right">
-                  {(Number(b.gas_burnt) / 1e12).toFixed(2)} Tgas
-                </td>
-              </tr>
+                  <span className="text-xs text-gray-500 shrink-0">{b.num_transactions} txns</span>
+                </div>
+              </div>
             ))}
-          </tbody>
-        </table>
-      </div>
-      {/* Mobile cards */}
-      <div className="sm:hidden rounded-lg border border-gray-200 bg-surface divide-y divide-gray-100">
-        <BlockFilterBar
-          filters={filters}
-          onChange={setFilters}
-          hasActiveFilters={hasActiveFilters}
-        />
-        {renderedBlocks.map((b) => (
-          <div key={b.block_height} className="px-3 py-2.5">
-            <div className="flex items-center justify-between gap-2 mb-0.5">
-              <span className="font-medium text-sm">
-                <BlockHeight height={b.block_height} />
-              </span>
-              <span className="text-xs text-gray-500 shrink-0">
-                <TimeAgo timestampNs={b.block_timestamp} />
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <AccountId accountId={b.author_id} />
-              <span className="text-xs text-gray-500 shrink-0">{b.num_transactions} txns</span>
-            </div>
           </div>
-        ))}
-      </div>
-      {!loading && renderedBlocks.length === 0 && hasActiveFilters && (
-        <p className="py-8 text-center text-sm text-gray-500">
-          No blocks match the current filters.
-        </p>
+          {!loading && renderedBlocks.length === 0 && hasActiveFilters && (
+            <p className="py-8 text-center text-sm text-gray-500">
+              No blocks match the current filters.
+            </p>
+          )}
+          <InfiniteScrollSentinel
+            onLoadMore={loadMore}
+            hasMore={hasMore}
+            disabled={loading}
+            loadingMore={loadingMore}
+          />
+        </>
       )}
-      <InfiniteScrollSentinel
-        onLoadMore={loadMore}
-        hasMore={hasMore}
-        disabled={loading}
-        loadingMore={loadingMore}
-      />
     </div>
   );
 }

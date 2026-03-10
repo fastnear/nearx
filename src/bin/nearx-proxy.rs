@@ -27,7 +27,19 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
-use nearx::{rpc_utils::fetch_block_with_txs, types::BlockRow};
+use nearx::{
+    rpc_utils::{fetch_block_with_txs, NEARX_CLIENT_HEADER},
+    types::BlockRow,
+};
+
+fn nearx_http_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("X-Nearx-Client", NEARX_CLIENT_HEADER.parse().unwrap());
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("reqwest client")
+}
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -157,8 +169,7 @@ async fn rpc_proxy_handler(
         StatusCode::BAD_REQUEST
     })?;
 
-    // Create HTTP client
-    let client = reqwest::Client::new();
+    let client = nearx_http_client();
 
     // Build request with optional FastNEAR apiKey query parameter
     let request_url =
@@ -202,8 +213,7 @@ async fn get_latest_handler(
 ) -> Result<Json<LatestResponse>, StatusCode> {
     log::debug!("Fetching latest block height");
 
-    // Create a simple HTTP client to query finality=final
-    let client = reqwest::Client::new();
+    let client = nearx_http_client();
 
     let request_url =
         nearx::config::with_fastnear_api_key(&state.rpc_url, state.auth_token.as_deref());

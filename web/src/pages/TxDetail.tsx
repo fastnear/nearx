@@ -15,6 +15,8 @@ import ReceiptCard from "../components/ReceiptCard";
 import { CircleCheck, CircleX, Clock, Radio } from "lucide-react";
 
 const PENDING_TX_REFRESH_INTERVAL_MS = 999;
+const NOT_FOUND_RETRY_INTERVAL_MS = 2_000;
+const NOT_FOUND_MAX_RETRIES = 7;
 
 export default function TxDetail() {
   const { txHash } = useParams<{ txHash: string }>();
@@ -22,6 +24,8 @@ export default function TxDetail() {
   const [tx, setTx] = useState<TransactionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const scrolledRef = useRef(false);
+  const notFoundRetriesRef = useRef(0);
+  const notFoundTimerRef = useRef<number | null>(null);
 
   const fetchTx = useCallback(
     async (opts?: { bypassCache?: boolean }) => {
@@ -37,6 +41,16 @@ export default function TxDetail() {
         if (data.transactions.length > 0) {
           setTx(data.transactions[0]);
           setError(null);
+          notFoundRetriesRef.current = 0;
+        } else if (notFoundRetriesRef.current < NOT_FOUND_MAX_RETRIES) {
+          // Tx may not be indexed yet (e.g. just broadcast). Retry with delay.
+          notFoundRetriesRef.current++;
+          console.log(
+            `[tx-detail] tx ${txHash} not found, retry ${notFoundRetriesRef.current}/${NOT_FOUND_MAX_RETRIES}`,
+          );
+          notFoundTimerRef.current = window.setTimeout(() => {
+            void fetchTx({ bypassCache: true });
+          }, NOT_FOUND_RETRY_INTERVAL_MS);
         } else {
           setError("Transaction not found");
         }
@@ -50,7 +64,18 @@ export default function TxDetail() {
   useEffect(() => {
     if (!txHash) return;
     scrolledRef.current = false;
+    notFoundRetriesRef.current = 0;
+    if (notFoundTimerRef.current !== null) {
+      window.clearTimeout(notFoundTimerRef.current);
+      notFoundTimerRef.current = null;
+    }
     void fetchTx({ bypassCache: true });
+    return () => {
+      if (notFoundTimerRef.current !== null) {
+        window.clearTimeout(notFoundTimerRef.current);
+        notFoundTimerRef.current = null;
+      }
+    };
   }, [txHash, fetchTx]);
 
   const parsed = useMemo(() => (tx ? parseTransaction(tx) : null), [tx]);

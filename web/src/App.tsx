@@ -1,10 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   BrowserRouter,
   HashRouter,
   Navigate,
   Route,
   Routes,
+  useLocation,
   useNavigate,
 } from "react-router-dom";
 import Layout from "./components/Layout";
@@ -14,6 +15,7 @@ import TxDetail from "./pages/TxDetail";
 import AccountDetail from "./pages/AccountDetail";
 import SignTransaction from "./pages/SignTransaction";
 import Staking from "./pages/Staking";
+import Settings from "./pages/Settings";
 import { mapCanonicalDeepLinkToRoute } from "./tauri/deeplink";
 import {
   getRuntimeConfig,
@@ -21,6 +23,7 @@ import {
   openExternal,
   subscribeDeepLinks,
 } from "./tauri/runtime";
+import { getPersistedLastRoute } from "./hooks/useRouteHistory";
 
 function RuntimeBridge() {
   useEffect(() => {
@@ -78,6 +81,27 @@ function DeepLinkBridge() {
       unlisten();
     };
   }, [navigate]);
+
+  return null;
+}
+
+function LastRouteRestore() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const restored = useRef(false);
+
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+
+    // Only restore when landing on the root route
+    if (location.pathname !== "/") return;
+
+    const saved = getPersistedLastRoute();
+    if (saved) {
+      navigate(saved, { replace: true });
+    }
+  }, []);
 
   return null;
 }
@@ -143,6 +167,9 @@ function ExplorerRoutes() {
         {isTauriRuntime() && (
           <Route path="staking" element={<Staking />} />
         )}
+        {isTauriRuntime() && (
+          <Route path="settings" element={<Settings />} />
+        )}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -157,6 +184,7 @@ export default function App() {
       <RuntimeBridge />
       <DeepLinkBridge />
       <ExternalLinkBridge />
+      <LastRouteRestore />
       <ExplorerRoutes />
     </Router>
   );

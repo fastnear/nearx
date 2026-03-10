@@ -1,5 +1,10 @@
-import { networkId } from "../config";
-import { getFastnearApiUrl } from "../tauri/runtime";
+import { networkId, nearxHeaders } from "../config";
+import { fetchFastnearJson, getFastnearApiUrl } from "../tauri/runtime";
+import {
+  isRetryableHttpStatus,
+  RetryableRequestError,
+  retryAsync,
+} from "./retry";
 
 const DEFAULT_BASE_URL =
   networkId === "testnet"
@@ -42,21 +47,52 @@ export async function getAccountFull(
 ): Promise<AccountFullResponse | null> {
   const runtimeBaseUrl = await getFastnearApiUrl(DEFAULT_BASE_URL);
 
-  let res = await fetch(`${runtimeBaseUrl}/v1/account/${accountId}/full`, {
-    signal,
-  });
+  const getHeaders = { "X-Nearx-Client": nearxHeaders["X-Nearx-Client"] };
+  if (signal?.aborted) {
+    throw new Error("request aborted");
+  }
+
+  let res = await fetchAccountFullJson(
+    `${runtimeBaseUrl}/v1/account/${accountId}/full`,
+    getHeaders,
+  );
 
   // Runtime config may point to tx.* endpoints that don't expose /v1/account/*/full.
   // Fall back to the dedicated FastNEAR API host before surfacing failure.
-  if (res.status === 404 && runtimeBaseUrl !== DEFAULT_BASE_URL) {
-    res = await fetch(`${DEFAULT_BASE_URL}/v1/account/${accountId}/full`, {
-      signal,
-    });
+  if (res.status === 404 && runtimeBaseUrl !== DEFAULT_BASE_URL && !signal?.aborted) {
+    res = await fetchAccountFullJson(
+      `${DEFAULT_BASE_URL}/v1/account/${accountId}/full`,
+      getHeaders,
+    );
   }
 
   if (res.status === 404) return null;
   if (!res.ok) {
-    throw new Error(`API error ${res.status}: ${res.statusText}`);
+    throw new Error(`API error ${res.status}: ${res.text ?? "request failed"}`);
   }
-  return res.json();
+  if (res.body == null) {
+    throw new Error(`API error ${res.status}: empty JSON response`);
+  }
+  return res.body;
+}
+
+async function fetchAccountFullJson(
+  url: string,
+  headers: Record<string, string>,
+) {
+  return retryAsync(async () => {
+    const res = await fetchFastnearJson<AccountFullResponse | null>({
+      url,
+      method: "GET",
+      headers,
+      include_api_key: true,
+    });
+    if (isRetryableHttpStatus(res.status)) {
+      throw new RetryableRequestError(
+        res.text ?? `FastNEAR error ${res.status}`,
+        res.status,
+      );
+    }
+    return res;
+  });
 }

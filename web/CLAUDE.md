@@ -13,17 +13,21 @@ NEAR blockchain explorer frontend. React 18 + TypeScript + Tailwind CSS v4 + Vit
 - `yarn build` — typecheck and build (`tsc -b && vite build`)
 - `yarn preview` — preview production build
 - `npx tsc -b` — typecheck only (no linter configured)
-- No test framework configured yet.
+- `npm run test` — run Vitest unit tests (`vitest run`)
+- `npm run test:watch` — Vitest in watch mode
 
 ## Architecture
 
 ### Routing
 
-Four routes defined in `src/App.tsx`, all wrapped in a shared `Layout`:
+Seven routes defined in `src/App.tsx`, all wrapped in a shared `Layout`:
 - `/` — Home (recent blocks list with pagination)
 - `/block/:blockId` — Block detail with transaction list
 - `/tx/:txHash` — Transaction detail with receipts
 - `/account/:accountId` — Account transaction history
+- `/sign` — Sign Transaction (Tauri-only)
+- `/staking` — Staking dashboard (Tauri-only)
+- `/settings` — Settings / key management (Tauri-only)
 
 ### API Layer (`src/api/`)
 

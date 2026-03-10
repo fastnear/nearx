@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { networkId } from "../config";
+import { networkId, nearxHeaders } from "../config";
 
 export interface TokenMetadata {
   name: string;
@@ -59,7 +59,7 @@ async function fetchMetadata(
   try {
     const res = await fetch(RPC_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: nearxHeaders,
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: "ft_metadata",

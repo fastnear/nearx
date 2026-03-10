@@ -1,11 +1,20 @@
 import { viewCall, viewAccessKey, broadcastTransaction } from "./rpc";
-import { networkId } from "../config";
-import { getNearNodeUrl, signTransaction, requestUserPresence } from "../tauri/runtime";
+import { networkId, nearxHeaders } from "../config";
+import { getNearNodeUrl, signTransaction } from "../tauri/runtime";
+import type { CredentialSource } from "../tauri/runtime";
+import {
+  isRetryableHttpStatus,
+  isRetryableMessage,
+  RetryableRequestError,
+  retryAsync,
+} from "./retry";
 
 const DEFAULT_RPC_URL =
   networkId === "testnet"
     ? "https://rpc.testnet.fastnear.com"
     : "https://rpc.mainnet.fastnear.com";
+const POOL_BALANCE_CONCURRENCY = 4;
+const SIGN_TIMEOUT_MS = 30_000;
 
 export interface ValidatorInfo {
   account_id: string;
@@ -23,20 +32,38 @@ export interface PoolBalance {
 
 export async function getValidators(): Promise<ValidatorInfo[]> {
   const rpcUrl = await getNearNodeUrl(DEFAULT_RPC_URL);
-  const res = await fetch(rpcUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: "1",
-      method: "validators",
-      params: [null],
-    }),
-  });
-  const json = await res.json();
-  if (json.error) {
-    throw new Error(json.error.message ?? JSON.stringify(json.error));
-  }
+  const json = await retryAsync(async () => {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: nearxHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "1",
+        method: "validators",
+        params: [null],
+      }),
+    });
+    const text = await res.text();
+    const parseJson = () => (text.trim() ? JSON.parse(text) : {});
+    if (isRetryableHttpStatus(res.status)) {
+      throw new RetryableRequestError(
+        text || `RPC error ${res.status}`,
+        res.status,
+      );
+    }
+    const parsed = parseJson();
+    if (!res.ok) {
+      throw new Error(parsed?.error?.message ?? `RPC error ${res.status}`);
+    }
+    if (parsed.error) {
+      const message = parsed.error.message ?? JSON.stringify(parsed.error);
+      if (isRetryableMessage(message)) {
+        throw new RetryableRequestError(message);
+      }
+      throw new Error(message);
+    }
+    return parsed;
+  }, { retries: 4, baseDelayMs: 500, maxDelayMs: 4_000 });
   return json.result.current_validators as ValidatorInfo[];
 }
 
@@ -64,14 +91,24 @@ export async function getPoolBalancesBatch(
   onProgress?: (done: number) => void,
 ): Promise<PoolBalance[]> {
   let done = 0;
-  const results = await Promise.all(
-    poolIds.map((poolId) =>
-      getPoolBalances(poolId, accountId).then((result) => {
-        done++;
-        onProgress?.(done);
-        return result;
-      }),
-    ),
+  let nextIndex = 0;
+  const results = new Array<PoolBalance>(poolIds.length);
+  const workerCount = Math.min(POOL_BALANCE_CONCURRENCY, poolIds.length);
+
+  async function worker() {
+    for (;;) {
+      const index = nextIndex++;
+      if (index >= poolIds.length) {
+        return;
+      }
+      results[index] = await getPoolBalances(poolIds[index], accountId);
+      done++;
+      onProgress?.(done);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: workerCount }, () => worker()),
   );
   return results;
 }
@@ -86,20 +123,26 @@ export interface StakingActionParams {
   poolId: string;
   signerId: string;
   publicKey: string;
+  credentialSource?: CredentialSource;
   amount?: string; // yoctoNEAR
   reason: string;
 }
 
 const FIFTY_TGAS = 50_000_000_000_000;
 
+export class StakingBroadcastError extends Error {
+  txHash: string;
+
+  constructor(message: string, txHash: string) {
+    super(message);
+    this.name = "StakingBroadcastError";
+    this.txHash = txHash;
+  }
+}
+
 export async function executeStakingAction(
   params: StakingActionParams,
-): Promise<{ txHash: string }> {
-  const presence = await requestUserPresence(params.reason);
-  if (!presence.verified) {
-    throw new Error("User presence verification failed — signing aborted");
-  }
-
+): Promise<{ txHash: string; broadcastResult: unknown }> {
   const ak = await viewAccessKey(params.signerId, params.publicKey);
 
   let methodName: string;
@@ -134,24 +177,49 @@ export async function executeStakingAction(
       break;
   }
 
-  const signResult = await signTransaction({
-    signer_id: params.signerId,
-    receiver_id: params.poolId,
-    nonce: ak.nonce + 1,
-    block_hash: ak.block_hash,
-    actions: [
-      {
-        type: "FunctionCall",
-        method_name: methodName,
-        args: btoa(JSON.stringify(args)),
-        gas: FIFTY_TGAS,
-        deposit,
-      },
-    ],
-    network: networkId,
-    reason: params.reason,
-  });
+  console.log("[staking] access key: nonce=%d block_hash=%s", ak.nonce, ak.block_hash);
+  let signTimeout: ReturnType<typeof setTimeout> | undefined;
+  const signResult = await Promise.race([
+    signTransaction({
+      signer_id: params.signerId,
+      signer_public_key: params.publicKey,
+      credential_source: params.credentialSource,
+      receiver_id: params.poolId,
+      nonce: ak.nonce + 1,
+      block_hash: ak.block_hash,
+      actions: [
+        {
+          type: "FunctionCall",
+          method_name: methodName,
+          args: btoa(JSON.stringify(args)),
+          gas: FIFTY_TGAS,
+          deposit,
+        },
+      ],
+      network: networkId,
+      reason: params.reason,
+    }).finally(() => clearTimeout(signTimeout)),
+    new Promise<never>((_resolve, reject) => {
+      signTimeout = setTimeout(() => reject(new Error(
+        params.credentialSource === "hardware_wallet"
+          ? "Ledger signing timed out. Keep the device unlocked with the NEAR app open, then try again."
+          : "Signing timed out. Please try again.",
+      )), SIGN_TIMEOUT_MS);
+    }),
+  ]);
 
-  await broadcastTransaction(signResult.signed_transaction_base64);
-  return { txHash: signResult.tx_hash };
+  console.log(
+    "[staking] signed tx_hash:", signResult.tx_hash,
+    "source:", signResult.credential_source,
+    "signed_tx_b64_len:", signResult.signed_transaction_base64.length,
+  );
+  try {
+    const broadcastResult = await broadcastTransaction(signResult.signed_transaction_base64);
+    console.log("[staking] broadcast result:", broadcastResult);
+    return { txHash: signResult.tx_hash, broadcastResult };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[staking] broadcast failed:", message, err);
+    throw new StakingBroadcastError(message, signResult.tx_hash);
+  }
 }

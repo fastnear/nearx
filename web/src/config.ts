@@ -19,3 +19,8 @@ const otherHost =
 
 export const otherNetworkUrl = `${window.location.protocol}//${otherHost}`;
 export const otherNetworkId = networkId === "testnet" ? "mainnet" : "testnet";
+
+export const nearxHeaders: Record<string, string> = {
+  "Content-Type": "application/json",
+  "X-Nearx-Client": "nearx-web",
+};
