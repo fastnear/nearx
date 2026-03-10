@@ -417,7 +417,10 @@ mod tests {
     #[test]
     fn nearxd_open_deep_link_protocol_roundtrip() {
         with_temp_socket_path(|| {
-            let socket = nearxd_socket_path();
+            let socket = match nearxd_endpoint() {
+                nearx_broker_ipc::BrokerEndpoint::Filesystem(p) => p,
+                other => panic!("expected filesystem endpoint, got {:?}", other),
+            };
             let listener = match UnixListener::bind(&socket) {
                 Ok(v) => v,
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -462,7 +465,10 @@ mod tests {
     #[test]
     fn nearxd_error_is_propagated() {
         with_temp_socket_path(|| {
-            let socket = nearxd_socket_path();
+            let socket = match nearxd_endpoint() {
+                nearx_broker_ipc::BrokerEndpoint::Filesystem(p) => p,
+                other => panic!("expected filesystem endpoint, got {:?}", other),
+            };
             let listener = match UnixListener::bind(&socket) {
                 Ok(v) => v,
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
