@@ -368,6 +368,30 @@ async fn connect_hardware_wallet(params: Value) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn get_preferences() -> Result<Value, String> {
+    log::info!("[get_preferences]");
+    match nearxd_request("get_preferences", json!({})) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            log::error!("[get_preferences] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn set_preferences(params: Value) -> Result<Value, String> {
+    log::info!("[set_preferences] params={params}");
+    match nearxd_request("set_preferences", params) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            log::error!("[set_preferences] error: {e}");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
 async fn sign_transaction(params: Value) -> Result<Value, String> {
     log::info!("[sign_transaction] params: {params}");
     match nearxd_request("sign_transaction", params) {
@@ -381,6 +405,41 @@ async fn sign_transaction(params: Value) -> Result<Value, String> {
             Err(e)
         }
     }
+}
+
+#[derive(Serialize)]
+struct WasmFileResult {
+    file_name: String,
+    file_size: usize,
+    code_base64: String,
+    directory: Option<String>,
+}
+
+#[tauri::command]
+async fn pick_wasm_file(default_dir: Option<String>) -> Result<Option<WasmFileResult>, String> {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .add_filter("WASM", &["wasm"])
+        .set_title("Select WASM contract file");
+    if let Some(dir) = &default_dir {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(handle) = dialog.pick_file().await else {
+        return Ok(None);
+    };
+    let data = handle.read().await;
+    use base64::Engine;
+    let code_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    let path = handle.path().to_path_buf();
+    Ok(Some(WasmFileResult {
+        file_name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        file_size: data.len(),
+        code_base64,
+        directory: path.parent().map(|p| p.to_string_lossy().to_string()),
+    }))
 }
 
 #[tauri::command]
@@ -554,7 +613,11 @@ fn main() {
 
     let mut builder = tauri::Builder::default()
         .manage(pending.clone())
-        .plugin(tauri_plugin_log::Builder::default().build())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level_for("reqwest", log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_single_instance::init({
             move |app, argv, _cwd| {
@@ -582,6 +645,8 @@ fn main() {
             remove_staking_watchlist_account,
             connect_hardware_wallet,
             get_signing_capabilities,
+            get_preferences,
+            set_preferences,
             list_near_signing_accounts,
             list_near_signing_keys,
             import_near_signing_keys,
@@ -589,6 +654,7 @@ fn main() {
             set_signing_key_label,
             import_near_credentials,
             sign_transaction,
+            pick_wasm_file,
             test_api::nearx_test_emit_deeplink,
             test_api::nearx_test_roundtrip_deeplink,
             test_api::nearx_test_get_last_route,
@@ -610,13 +676,16 @@ fn main() {
                 remove_staking_watchlist_account,
                 connect_hardware_wallet,
                 get_signing_capabilities,
+                get_preferences,
+                set_preferences,
                 list_near_signing_accounts,
                 list_near_signing_keys,
                 import_near_signing_keys,
                 reprotect_near_signing_key,
                 set_signing_key_label,
                 import_near_credentials,
-                sign_transaction
+                sign_transaction,
+                pick_wasm_file
             ]);
     }
 

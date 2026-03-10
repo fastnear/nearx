@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::sync::Mutex;
 
 use crate::config::{signing_settings_file_path, validate_account_id_param};
 use crate::credentials::{normalize_keychain_protection, normalize_sources};
-use crate::keychain::{keychain_read_generic, keychain_write_generic};
 use crate::util::now_ms;
 
-pub(crate) const KEYCHAIN_SIGNING_SETTINGS_SERVICE: &str = "nearxd.signing.settings";
-pub(crate) const KEYCHAIN_SIGNING_SETTINGS_ACCOUNT: &str = "default";
 pub(crate) const SIGNING_KEY_INDEX_KEY: &str = "near_signing_keys";
 pub(crate) const SIGNING_KEY_INDEX_VERSION: u64 = 1;
 pub(crate) const SIGNING_KEY_LABEL_MAX_CHARS: usize = 64;
 pub(crate) const SIGNING_KEY_STALE_AFTER_MS: u64 = 90 * 24 * 60 * 60 * 1000; // 90 days
 pub(crate) const SIGNING_KEY_PRUNE_AFTER_MS: u64 = 365 * 24 * 60 * 60 * 1000; // 1 year
+pub(crate) const PREFERENCES_KEY: &str = "preferences";
+pub(crate) const PREFERENCES_VERSION: u64 = 1;
 pub(crate) const STAKING_WATCHLIST_KEY: &str = "staking_watchlist";
 pub(crate) const STAKING_WATCHLIST_VERSION: u64 = 1;
 pub(crate) const HARDWARE_WALLET_INDEX_KEY: &str = "hardware_wallet_index";
@@ -67,6 +67,37 @@ pub(crate) struct HardwareWalletIndexRecord {
     pub derivation_path: String,
     #[serde(default)]
     pub last_seen_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct UserPreferences {
+    #[serde(default)]
+    pub always_prompt_user_presence: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wasm_directory: Option<String>,
+}
+
+pub(crate) fn read_preferences(settings: &Value) -> UserPreferences {
+    settings
+        .get(PREFERENCES_KEY)
+        .and_then(|v| v.get("data"))
+        .and_then(|v| serde_json::from_value::<UserPreferences>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn write_preferences(settings: &mut Value, prefs: &UserPreferences) {
+    if !settings.is_object() {
+        *settings = json!({});
+    }
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert(
+            PREFERENCES_KEY.to_string(),
+            json!({
+                "version": PREFERENCES_VERSION,
+                "data": serde_json::to_value(prefs).unwrap_or_else(|_| json!({})),
+            }),
+        );
+    }
 }
 
 pub(crate) fn is_index_record_stale(last_seen_at_ms: u64, now: u64) -> bool {
@@ -190,14 +221,18 @@ pub(crate) fn write_signing_settings_file(settings: &Value) -> Result<(), String
 
     let body =
         serde_json::to_string_pretty(settings).map_err(|e| format!("encode settings json: {e}"))?;
-    fs::write(&path, body.as_bytes()).map_err(|e| format!("write settings file: {e}"))?;
+
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, body.as_bytes()).map_err(|e| format!("write settings temp file: {e}"))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms).map_err(|e| format!("chmod settings file: {e}"))?;
+        fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod settings temp file: {e}"))?;
     }
+
+    fs::rename(&tmp, &path).map_err(|e| format!("rename settings file: {e}"))?;
 
     Ok(())
 }
@@ -527,49 +562,23 @@ pub(crate) fn signing_key_label(
 }
 
 pub(crate) fn load_signing_settings() -> (Option<Value>, &'static str) {
-    if let Some(raw) = keychain_read_generic(
-        KEYCHAIN_SIGNING_SETTINGS_SERVICE,
-        KEYCHAIN_SIGNING_SETTINGS_ACCOUNT,
-    ) {
-        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-            return (Some(v), "keychain");
-        }
-        log::warn!("nearxd: failed to parse keychain signing settings JSON");
-    }
-
+    // File is the sole storage for settings (non-secret metadata).
     if let Some(v) = read_signing_settings_file() {
         return (Some(v), "file");
     }
-
     (None, "none")
 }
 
 pub(crate) fn persist_signing_settings(
     settings: &Value,
-    prefer_keychain: bool,
 ) -> Result<&'static str, String> {
-    let encoded =
-        serde_json::to_string(settings).map_err(|e| format!("encode settings json: {e}"))?;
-
-    if prefer_keychain {
-        match keychain_write_generic(
-            KEYCHAIN_SIGNING_SETTINGS_SERVICE,
-            KEYCHAIN_SIGNING_SETTINGS_ACCOUNT,
-            &encoded,
-        ) {
-            Ok(()) => return Ok("keychain"),
-            Err(e) => {
-                log::warn!("nearxd: keychain settings write failed ({e}), falling back to file");
-            }
-        }
-    }
-
     write_signing_settings_file(settings)?;
     Ok("file")
 }
 
 pub(crate) fn set_signing_key_label_result(
     params: &Value,
+    settings_lock: &Mutex<()>,
 ) -> Result<Value, (&'static str, String)> {
     let network =
         crate::broker::resolve_network_param(params, "mainnet").map_err(|e| ("ERR_PARAMS", e))?;
@@ -591,8 +600,8 @@ pub(crate) fn set_signing_key_label_result(
         .map_err(|e| ("ERR_PARAMS", format!("invalid public_key: {e}")))?
         .to_string();
     let label = parse_signing_key_label(params, "label").map_err(|e| ("ERR_PARAMS", e))?;
-    let prefer_keychain = crate::broker::parse_bool(params, "prefer_keychain", true);
 
+    let _guard = settings_lock.lock().unwrap();
     let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
     if !settings.is_object() {
         settings = json!({});
@@ -612,7 +621,8 @@ pub(crate) fn set_signing_key_label_result(
         }],
     );
     let settings_store =
-        persist_signing_settings(&settings, prefer_keychain).map_err(|e| ("ERR_PERSIST", e))?;
+        persist_signing_settings(&settings).map_err(|e| ("ERR_PERSIST", e))?;
+    drop(_guard);
 
     Ok(json!({
         "network": network,
@@ -651,6 +661,7 @@ pub(crate) fn list_staking_watchlist_result(
 
 pub(crate) fn add_staking_watchlist_account_result(
     params: &Value,
+    settings_lock: &Mutex<()>,
 ) -> Result<Value, (&'static str, String)> {
     let network =
         crate::broker::resolve_network_param(params, "mainnet").map_err(|e| ("ERR_PARAMS", e))?;
@@ -685,8 +696,7 @@ pub(crate) fn add_staking_watchlist_account_result(
             "hardware wallet metadata is only allowed when source='hardware_wallet'".to_string(),
         ));
     }
-    let prefer_keychain = crate::broker::parse_bool(params, "prefer_keychain", true);
-
+    let _guard = settings_lock.lock().unwrap();
     let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
     if !settings.is_object() {
         settings = json!({});
@@ -700,9 +710,10 @@ pub(crate) fn add_staking_watchlist_account_result(
     };
     upsert_staking_watchlist_entry(&mut settings, entry);
     let settings_store =
-        persist_signing_settings(&settings, prefer_keychain).map_err(|e| ("ERR_PERSIST", e))?;
+        persist_signing_settings(&settings).map_err(|e| ("ERR_PERSIST", e))?;
 
     let entries = staking_watchlist_for_network(&settings, &network);
+    drop(_guard);
     let out_entries: Vec<Value> = entries
         .iter()
         .filter_map(|e| serde_json::to_value(e).ok())
@@ -720,6 +731,7 @@ pub(crate) fn add_staking_watchlist_account_result(
 
 pub(crate) fn remove_staking_watchlist_account_result(
     params: &Value,
+    settings_lock: &Mutex<()>,
 ) -> Result<Value, (&'static str, String)> {
     let network =
         crate::broker::resolve_network_param(params, "mainnet").map_err(|e| ("ERR_PARAMS", e))?;
@@ -730,17 +742,18 @@ pub(crate) fn remove_staking_watchlist_account_result(
         ));
     };
     let account_id = validate_account_id_param(raw_account_id).map_err(|e| ("ERR_PARAMS", e))?;
-    let prefer_keychain = crate::broker::parse_bool(params, "prefer_keychain", true);
 
+    let _guard = settings_lock.lock().unwrap();
     let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
     if !settings.is_object() {
         settings = json!({});
     }
     let removed = remove_staking_watchlist_entry(&mut settings, &network, &account_id);
     let settings_store =
-        persist_signing_settings(&settings, prefer_keychain).map_err(|e| ("ERR_PERSIST", e))?;
+        persist_signing_settings(&settings).map_err(|e| ("ERR_PERSIST", e))?;
 
     let entries = staking_watchlist_for_network(&settings, &network);
+    drop(_guard);
     let out_entries: Vec<Value> = entries
         .iter()
         .filter_map(|e| serde_json::to_value(e).ok())

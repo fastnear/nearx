@@ -3,10 +3,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fmt::Write as _;
+use std::sync::Mutex;
 
 use crate::credentials::{
     collect_legacy_credentials, credential_curve_type, near_cli_secure_has_credential,
-    nearxd_keychain_has_credential, SOURCE_HARDWARE_WALLET, SOURCE_LEGACY_FILE,
+    nearxd_keychain_has_scoped_credential, SOURCE_HARDWARE_WALLET, SOURCE_LEGACY_FILE,
     SOURCE_NEARXD_KEYCHAIN, SOURCE_NEAR_CLI_SECURE,
 };
 use crate::rpc::{access_key_permission_to_summary, fetch_onchain_access_keys};
@@ -97,15 +98,15 @@ fn mock_ledger_sign_transaction(
     path: &str,
 ) -> Result<near_crypto::Signature, HardwareWalletError> {
     use borsh::BorshDeserialize;
-    use near_primitives::transaction::Transaction;
+    use near_primitives::transaction::{Transaction, TransactionV0};
 
-    let tx = Transaction::try_from_slice(unsigned_tx).map_err(|e| {
+    let tx_v0 = TransactionV0::try_from_slice(unsigned_tx).map_err(|e| {
         HardwareWalletError::new(
             "ERR_HARDWARE_TRANSPORT",
             format!("decode unsigned transaction for mock signer failed: {e}"),
         )
     })?;
-    let (tx_hash, _size) = tx.get_hash_and_size();
+    let (tx_hash, _size) = Transaction::V0(tx_v0).get_hash_and_size();
     Ok(mock_ledger_secret_key(path).sign(tx_hash.as_ref()))
 }
 
@@ -117,6 +118,8 @@ const LEDGER_CLA: u8 = 0x80;
 const LEDGER_INS_GET_PUBLIC_KEY: u8 = 0x04;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_INS_SIGN_TRANSACTION: u8 = 0x02;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+const LEDGER_INS_GET_VERSION: u8 = 0x06;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const LEDGER_RETURN_CODE_OK: u16 = 0x9000;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -150,6 +153,11 @@ fn map_ledger_retcode(retcode: u16) -> HardwareWalletError {
         0x5515 => HardwareWalletError::new(
             "ERR_HARDWARE_UNAVAILABLE",
             "Ledger is locked or unavailable",
+        ),
+        0x6990 => HardwareWalletError::new(
+            "ERR_HARDWARE_TRANSPORT",
+            "Ledger APDU error 0x6990 — the NEAR app may need updating. \
+             Install the latest NEAR app via Ledger Live.",
         ),
         _ => HardwareWalletError::new(
             "ERR_HARDWARE_TRANSPORT",
@@ -316,9 +324,43 @@ fn ledger_sign_transaction(
     unsigned_tx: &[u8],
     derivation_path: &slipped10::BIP32Path,
 ) -> Result<near_crypto::Signature, HardwareWalletError> {
+    // Use a single transport for the entire signing operation (all chunks
+    // must go over the same HID connection).
+    let transport = ledger_get_transport()?;
+
+    // Reset Ledger NEAR app state to clear any partially-filled buffer from
+    // a previous interrupted operation (mirrors near-ledger-js behavior).
+    let version_cmd = ledger_transport::APDUCommand {
+        cla: LEDGER_CLA,
+        ins: LEDGER_INS_GET_VERSION,
+        p1: 0x00,
+        p2: 0x00,
+        data: vec![],
+    };
+    match transport.exchange(&version_cmd) {
+        Ok(resp) => {
+            let data = resp.data();
+            if data.len() >= 3 {
+                log::info!(
+                    "ledger NEAR app version: {}.{}.{}",
+                    data[0], data[1], data[2],
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!("ledger getVersion (state reset) failed: {e:?}");
+        }
+    }
+
     let mut data = ledger_hd_path_to_bytes(derivation_path);
     data.extend_from_slice(unsigned_tx);
     let chunks: Vec<&[u8]> = data.chunks(LEDGER_CHUNK_SIZE).collect();
+    log::info!(
+        "ledger sign: tx_bytes={} total_payload={} chunks={}",
+        unsigned_tx.len(),
+        data.len(),
+        chunks.len(),
+    );
     for (idx, chunk) in chunks.iter().enumerate() {
         let is_last = idx + 1 == chunks.len();
         let command = ledger_transport::APDUCommand {
@@ -332,7 +374,9 @@ fn ledger_sign_transaction(
             p2: LEDGER_NETWORK_ID,
             data: chunk.to_vec(),
         };
-        let response = ledger_exchange(&command)?;
+        let response = transport
+            .exchange(&command)
+            .map_err(|e| map_ledger_transport_error(format!("{e:?}")))?;
         if response.retcode() != LEDGER_RETURN_CODE_OK {
             return Err(map_ledger_retcode(response.retcode()));
         }
@@ -481,6 +525,7 @@ pub(crate) fn resolve_hardware_wallet_record(
 
 pub(crate) fn connect_hardware_wallet_result(
     params: &Value,
+    settings_lock: &Mutex<()>,
 ) -> Result<Value, (&'static str, String)> {
     let network =
         crate::broker::resolve_network_param(params, "mainnet").map_err(|e| ("ERR_PARAMS", e))?;
@@ -505,7 +550,6 @@ pub(crate) fn connect_hardware_wallet_result(
         .trim()
         .to_string();
     let display_confirm = crate::broker::parse_bool(params, "display_confirm", true);
-    let prefer_keychain = crate::broker::parse_bool(params, "prefer_keychain", true);
 
     let public_key =
         hardware_wallet_get_public_key(&wallet_type, &derivation_path, display_confirm)
@@ -548,6 +592,7 @@ pub(crate) fn connect_hardware_wallet_result(
         }
     };
 
+    let _guard = settings_lock.lock().unwrap();
     let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
     if !settings.is_object() {
         settings = json!({});
@@ -572,7 +617,7 @@ pub(crate) fn connect_hardware_wallet_result(
             public_key: public_key_str.clone(),
             label: None,
             available_sources: vec![SOURCE_HARDWARE_WALLET.to_string()],
-            in_nearxd_keychain: nearxd_keychain_has_credential(
+            in_nearxd_keychain: nearxd_keychain_has_scoped_credential(
                 &network,
                 &account_id,
                 &public_key_str,
@@ -583,11 +628,12 @@ pub(crate) fn connect_hardware_wallet_result(
     );
 
     let settings_store =
-        persist_signing_settings(&settings, prefer_keychain).map_err(|e| ("ERR_PERSIST", e))?;
+        persist_signing_settings(&settings).map_err(|e| ("ERR_PERSIST", e))?;
+    drop(_guard);
 
     let mut available_sources = BTreeSet::new();
     available_sources.insert(SOURCE_HARDWARE_WALLET.to_string());
-    if nearxd_keychain_has_credential(&network, &account_id, &public_key_str) {
+    if nearxd_keychain_has_scoped_credential(&network, &account_id, &public_key_str) {
         available_sources.insert(SOURCE_NEARXD_KEYCHAIN.to_string());
     }
     if near_cli_secure_has_credential(&network, &account_id, &public_key_str) {

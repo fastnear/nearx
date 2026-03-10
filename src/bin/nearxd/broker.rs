@@ -15,23 +15,20 @@ use crate::config::{
     expand_tilde_path, near_credentials_dir, runtime_fastnear_api_url, runtime_near_node_url,
 };
 use crate::credentials::{
-    collect_legacy_credentials, nearxd_credential_account_legacy, nearxd_keychain_has_credential,
-    normalize_source, read_legacy_credential, read_near_cli_secure_credential,
-    read_near_credential_keychain, KEYCHAIN_NEAR_CREDENTIAL_SERVICE, SOURCE_HARDWARE_WALLET,
-    SOURCE_LEGACY_FILE, SOURCE_NEARXD_KEYCHAIN, SOURCE_NEAR_CLI_SECURE,
+    collect_legacy_credentials, nearxd_keychain_has_scoped_credential, normalize_source,
+    read_legacy_credential, read_near_cli_secure_credential, read_near_credential_keychain,
+    SOURCE_HARDWARE_WALLET, SOURCE_LEGACY_FILE, SOURCE_NEARXD_KEYCHAIN, SOURCE_NEAR_CLI_SECURE,
 };
 use crate::hardware_wallet::{
     connect_hardware_wallet_result, hardware_wallet_sign_transaction, hardware_wallet_supported,
     resolve_hardware_wallet_record,
 };
-use crate::keychain::{
-    keychain_has_generic, secure_store_backend_name, secure_store_persistence_supported,
-};
+use crate::keychain::{secure_store_backend_name, secure_store_persistence_supported};
 use crate::settings::HardwareWalletIndexRecord;
 use crate::settings::{
     add_staking_watchlist_account_result, list_staking_watchlist_result, load_signing_settings,
-    persist_signing_settings, remove_staking_watchlist_account_result,
-    set_signing_key_label_result,
+    persist_signing_settings, read_preferences, remove_staking_watchlist_account_result,
+    set_signing_key_label_result, write_preferences, UserPreferences,
 };
 use crate::signing::{
     import_near_signing_keys_result, list_near_signing_accounts_result,
@@ -53,6 +50,7 @@ pub(crate) struct BrokerState {
     pub session_token: Mutex<Option<String>>,
     pub token_store: Arc<dyn TokenStore>,
     pub sign_intents: Mutex<std::collections::HashMap<String, SignIntent>>,
+    pub settings_lock: Mutex<()>,
 }
 
 impl BrokerState {
@@ -61,6 +59,7 @@ impl BrokerState {
             session_token: Mutex::new(None),
             token_store: build_token_store(),
             sign_intents: Mutex::new(std::collections::HashMap::new()),
+            settings_lock: Mutex::new(()),
         }
     }
 }
@@ -155,7 +154,11 @@ pub(crate) fn parse_optional_bool(params: &Value, key: &str) -> Option<bool> {
 }
 
 pub(crate) fn parse_near_actions(actions_json: &[Value]) -> Result<Vec<Action>, String> {
-    use near_primitives::action::{FunctionCallAction, TransferAction};
+    use near_primitives::action::{
+        AddKeyAction, CreateAccountAction, DeleteAccountAction, DeleteKeyAction,
+        DeployContractAction, FunctionCallAction, StakeAction, TransferAction,
+    };
+    use near_primitives::account::{AccessKey, AccessKeyPermission, FunctionCallPermission};
 
     let mut actions = Vec::with_capacity(actions_json.len());
     for (i, a) in actions_json.iter().enumerate() {
@@ -201,9 +204,164 @@ pub(crate) fn parse_near_actions(actions_json: &[Value]) -> Result<Vec<Action>, 
                     deposit,
                 })));
             }
+            "DeployContract" => {
+                let code_b64 = a
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!(
+                            "action[{i}]: DeployContract requires 'code' string (base64-encoded WASM)"
+                        )
+                    })?;
+                let code = STANDARD.decode(code_b64).map_err(|e| {
+                    format!("action[{i}]: invalid base64 code: {e}")
+                })?;
+                actions.push(Action::DeployContract(DeployContractAction { code }));
+            }
+            "CreateAccount" => {
+                actions.push(Action::CreateAccount(CreateAccountAction {}));
+            }
+            "DeleteAccount" => {
+                let beneficiary_id = a
+                    .get("beneficiary_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("action[{i}]: DeleteAccount requires 'beneficiary_id' string")
+                    })?
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid beneficiary_id: {e}"))?;
+                actions.push(Action::DeleteAccount(DeleteAccountAction {
+                    beneficiary_id,
+                }));
+            }
+            "DeleteKey" => {
+                let pk_str = a
+                    .get("public_key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("action[{i}]: DeleteKey requires 'public_key' string")
+                    })?;
+                let public_key: near_crypto::PublicKey = pk_str
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid public_key: {e}"))?;
+                actions.push(Action::DeleteKey(Box::new(DeleteKeyAction { public_key })));
+            }
+            "AddKey" => {
+                let pk_str = a
+                    .get("public_key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("action[{i}]: AddKey requires 'public_key' string")
+                    })?;
+                let public_key: near_crypto::PublicKey = pk_str
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid public_key: {e}"))?;
+                let permission = match a.get("permission") {
+                    Some(Value::String(s)) if s == "FullAccess" => {
+                        AccessKeyPermission::FullAccess
+                    }
+                    Some(obj @ Value::Object(_)) => {
+                        let perm_type = obj
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if perm_type != "FunctionCall" {
+                            return Err(format!(
+                                "action[{i}]: AddKey permission type must be 'FunctionCall' or string 'FullAccess'"
+                            ));
+                        }
+                        let allowance = match obj.get("allowance") {
+                            Some(Value::String(s)) => {
+                                let v: u128 = s.parse().map_err(|e| {
+                                    format!("action[{i}]: invalid allowance: {e}")
+                                })?;
+                                Some(v)
+                            }
+                            Some(Value::Null) | None => None,
+                            _ => {
+                                return Err(format!(
+                                    "action[{i}]: allowance must be a string or null"
+                                ));
+                            }
+                        };
+                        let receiver_id = obj
+                            .get("receiver_id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                format!(
+                                    "action[{i}]: FunctionCall permission requires 'receiver_id'"
+                                )
+                            })?
+                            .to_string();
+                        let method_names = match obj.get("method_names") {
+                            Some(Value::Array(arr)) => arr
+                                .iter()
+                                .map(|v| {
+                                    v.as_str()
+                                        .map(|s| s.to_string())
+                                        .ok_or_else(|| {
+                                            format!(
+                                                "action[{i}]: method_names must be an array of strings"
+                                            )
+                                        })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                            Some(Value::Null) | None => vec![],
+                            _ => {
+                                return Err(format!(
+                                    "action[{i}]: method_names must be an array or null"
+                                ));
+                            }
+                        };
+                        AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                            allowance,
+                            receiver_id,
+                            method_names,
+                        })
+                    }
+                    Some(_) => {
+                        return Err(format!(
+                            "action[{i}]: AddKey 'permission' must be \"FullAccess\" or a FunctionCall object"
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "action[{i}]: AddKey requires 'permission' field"
+                        ));
+                    }
+                };
+                actions.push(Action::AddKey(Box::new(AddKeyAction {
+                    public_key,
+                    access_key: AccessKey {
+                        nonce: 0,
+                        permission,
+                    },
+                })));
+            }
+            "Stake" => {
+                let stake_str = a
+                    .get("stake")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("action[{i}]: Stake requires 'stake' string"))?;
+                let stake: u128 = stake_str
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid stake: {e}"))?;
+                let pk_str = a
+                    .get("public_key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("action[{i}]: Stake requires 'public_key' string")
+                    })?;
+                let public_key: near_crypto::PublicKey = pk_str
+                    .parse()
+                    .map_err(|e| format!("action[{i}]: invalid public_key: {e}"))?;
+                actions.push(Action::Stake(Box::new(StakeAction { stake, public_key })));
+            }
             other => {
                 return Err(format!(
-                    "action[{i}]: unsupported action type '{other}' (supported: Transfer, FunctionCall)"
+                    "action[{i}]: unsupported action type '{other}' \
+                     (supported: Transfer, FunctionCall, DeployContract, CreateAccount, \
+                     DeleteAccount, DeleteKey, AddKey, Stake)"
                 ));
             }
         }
@@ -464,13 +622,51 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
             let Some(settings) = req.params.get("settings").cloned() else {
                 return BrokerResponse::err(id, "ERR_PARAMS", "missing required param: settings");
             };
-            let prefer_keychain = parse_bool(&req.params, "prefer_keychain", true);
-            match persist_signing_settings(&settings, prefer_keychain) {
+            match persist_signing_settings(&settings) {
                 Ok(source) => BrokerResponse::ok(
                     id,
                     json!({
                         "stored": true,
                         "source": source,
+                    }),
+                ),
+                Err(e) => BrokerResponse::err(id, "ERR_PERSIST", e),
+            }
+        }
+
+        "get_preferences" => {
+            let (settings, source) = load_signing_settings();
+            let prefs = read_preferences(&settings.unwrap_or_else(|| json!({})));
+            BrokerResponse::ok(
+                id,
+                json!({
+                    "preferences": serde_json::to_value(&prefs).unwrap_or_else(|_| json!({})),
+                    "source": source,
+                }),
+            )
+        }
+
+        "set_preferences" => {
+            let always_prompt = parse_bool(&req.params, "always_prompt_user_presence", false);
+            let last_wasm_directory = parse_string(&req.params, "last_wasm_directory")
+                .map(|s| s.to_string());
+            let _guard = state.settings_lock.lock().unwrap();
+            let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
+            if !settings.is_object() {
+                settings = json!({});
+            }
+            let prefs = UserPreferences {
+                always_prompt_user_presence: always_prompt,
+                last_wasm_directory,
+            };
+            write_preferences(&mut settings, &prefs);
+            match persist_signing_settings(&settings) {
+                Ok(source) => BrokerResponse::ok(
+                    id,
+                    json!({
+                        "stored": true,
+                        "source": source,
+                        "preferences": serde_json::to_value(&prefs).unwrap_or_else(|_| json!({})),
                     }),
                 ),
                 Err(e) => BrokerResponse::err(id, "ERR_PERSIST", e),
@@ -483,25 +679,25 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
         },
 
         "add_staking_watchlist_account" => {
-            match add_staking_watchlist_account_result(&req.params) {
+            match add_staking_watchlist_account_result(&req.params, &state.settings_lock) {
                 Ok(v) => BrokerResponse::ok(id, v),
                 Err((code, msg)) => BrokerResponse::err(id, code, msg),
             }
         }
 
         "remove_staking_watchlist_account" => {
-            match remove_staking_watchlist_account_result(&req.params) {
+            match remove_staking_watchlist_account_result(&req.params, &state.settings_lock) {
                 Ok(v) => BrokerResponse::ok(id, v),
                 Err((code, msg)) => BrokerResponse::err(id, code, msg),
             }
         }
 
-        "set_signing_key_label" => match set_signing_key_label_result(&req.params) {
+        "set_signing_key_label" => match set_signing_key_label_result(&req.params, &state.settings_lock) {
             Ok(v) => BrokerResponse::ok(id, v),
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
         },
 
-        "connect_hardware_wallet" => match connect_hardware_wallet_result(&req.params) {
+        "connect_hardware_wallet" => match connect_hardware_wallet_result(&req.params, &state.settings_lock) {
             Ok(v) => BrokerResponse::ok(id, v),
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
         },
@@ -516,12 +712,12 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
         },
 
-        "import_near_signing_keys" => match import_near_signing_keys_result(&req.params, None) {
+        "import_near_signing_keys" => match import_near_signing_keys_result(&req.params, None, &state.settings_lock) {
             Ok(v) => BrokerResponse::ok(id, v),
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
         },
 
-        "reprotect_near_signing_key" => match reprotect_near_signing_key_result(&req.params) {
+        "reprotect_near_signing_key" => match reprotect_near_signing_key_result(&req.params, &state.settings_lock) {
             Ok(v) => BrokerResponse::ok(id, v),
             Err((code, msg)) => BrokerResponse::err(id, code, msg),
         },
@@ -566,11 +762,7 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                 let account_id = entry.credential.account_id.clone();
                 let public_key = entry.credential.public_key.clone();
                 let in_keychain =
-                    nearxd_keychain_has_credential(&network, &account_id, &public_key)
-                        || keychain_has_generic(
-                            KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
-                            &nearxd_credential_account_legacy(&network, &account_id),
-                        );
+                    nearxd_keychain_has_scoped_credential(&network, &account_id, &public_key);
                 accounts.push(json!({
                     "account_id": account_id,
                     "public_key": public_key,
@@ -592,6 +784,7 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
             let result = import_near_signing_keys_result(
                 &req.params,
                 Some(vec![SOURCE_LEGACY_FILE.to_string()]),
+                &state.settings_lock,
             );
             match result {
                 Ok(v) => BrokerResponse::ok(id, v),
@@ -963,6 +1156,43 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                 Err(e) => return BrokerResponse::err(id, "ERR_PARAMS", e),
             };
 
+            // Validate sender==receiver for self-targeting actions.
+            // The NEAR protocol (`check_actor_permissions`) rejects transactions where
+            // receiver differs from signer for: DeployContract, Stake, AddKey, DeleteKey,
+            // DeleteAccount. Catch this early with a clear error instead of letting the
+            // runtime reject it with a cryptic message.
+            if signer_id != receiver_id {
+                for (i, action) in actions.iter().enumerate() {
+                    let self_targeting = matches!(
+                        action,
+                        Action::DeployContract(_)
+                            | Action::Stake(_)
+                            | Action::AddKey(_)
+                            | Action::DeleteKey(_)
+                            | Action::DeleteAccount(_)
+                    );
+                    if self_targeting {
+                        let action_name = match action {
+                            Action::DeployContract(_) => "DeployContract",
+                            Action::Stake(_) => "Stake",
+                            Action::AddKey(_) => "AddKey",
+                            Action::DeleteKey(_) => "DeleteKey",
+                            Action::DeleteAccount(_) => "DeleteAccount",
+                            _ => unreachable!(),
+                        };
+                        return BrokerResponse::err(
+                            id,
+                            "ERR_PARAMS",
+                            format!(
+                                "action[{i}]: {action_name} requires receiver_id to equal signer_id \
+                                 (got receiver '{}', signer '{}')",
+                                receiver_id, signer_id
+                            ),
+                        );
+                    }
+                }
+            }
+
             // Resolve credential from local file, OS secret storage, secure storage, or hardware.
             let network = parse_string(&req.params, "network")
                 .unwrap_or("mainnet")
@@ -988,8 +1218,8 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
 
             let mut secret_key: Option<SecretKey> = None;
             let mut hardware_record: Option<HardwareWalletIndexRecord> = None;
-            let used_credential_source: String;
-            let public_key: PublicKey;
+            let mut used_credential_source: String;
+            let mut public_key: PublicKey;
 
             if credential_source.as_deref() == Some(SOURCE_HARDWARE_WALLET) {
                 let Some(public_key_str) = signer_public_key else {
@@ -1064,25 +1294,99 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                 secret_key = Some(parsed_secret);
             }
 
+            // If keychain source was explicitly requested but the keychain copy
+            // lacks biometric protection on macOS, silently fall back to the next
+            // available source instead of blocking.
             if credential_source.as_deref() == Some(SOURCE_NEARXD_KEYCHAIN) {
-                let (keychain_protection, import_required) = nearxd_keychain_state_for_key(
+                let keychain_protection = nearxd_keychain_state_for_key(
                     load_signing_settings().0.as_ref(),
                     &network,
                     signer_id_str,
                     &public_key.to_string(),
                 );
-                if import_required {
-                    let protection_label = keychain_protection.unwrap_or_else(|| "unknown".to_string());
-                    return BrokerResponse::err(
-                        id,
-                        "ERR_IMPORT_REQUIRED",
-                        format!(
-                            "Keychain signing for {} / {} requires biometric protection. Current Keychain protection is '{}'. Import or repair the Keychain copy, or choose File system / OS secrets instead.",
-                            signer_id_str,
-                            public_key,
-                            protection_label,
-                        ),
+                let needs_fallback = cfg!(target_os = "macos")
+                    && keychain_protection.as_deref()
+                        != Some(crate::credentials::KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET);
+                if needs_fallback {
+                    log::info!(
+                        "nearxd: keychain protection for {}/{} is '{}'; falling back to next source",
+                        signer_id_str,
+                        public_key,
+                        keychain_protection.as_deref().unwrap_or("unknown"),
                     );
+                    // Try non-keychain sources in order to avoid re-attempting the bad source
+                    let fallback_sources = [SOURCE_NEAR_CLI_SECURE, SOURCE_LEGACY_FILE];
+                    let mut fallback_result = None;
+                    for source in &fallback_sources {
+                        match resolve_signing_credential(
+                            &network,
+                            signer_id_str,
+                            signer_public_key,
+                            Some(source),
+                            reason,
+                        ) {
+                            Ok(v) => {
+                                fallback_result = Some(v);
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    match fallback_result {
+                        Some((fallback_cred, fallback_source)) => {
+                            let Some(pk_str) = fallback_cred.get("private_key").and_then(Value::as_str) else {
+                                return BrokerResponse::err(id, "ERR_AUTH", "fallback credential missing 'private_key'");
+                            };
+                            match pk_str.parse::<SecretKey>() {
+                                Ok(parsed) => {
+                                    public_key = fallback_cred
+                                        .get("public_key")
+                                        .and_then(Value::as_str)
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or_else(|| parsed.public_key());
+                                    secret_key = Some(parsed);
+                                    used_credential_source = fallback_source;
+                                }
+                                Err(e) => {
+                                    return BrokerResponse::err(
+                                        id,
+                                        "ERR_AUTH",
+                                        format!("fallback credential invalid: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            return BrokerResponse::err(
+                                id,
+                                "ERR_AUTH",
+                                "keychain source lacks biometric protection and no fallback source available",
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Enforce always_prompt_user_presence preference for all software sources.
+            // Hardware wallets are excluded because Ledger has its own physical confirmation.
+            // Keychain sources are NOT excluded — the preference is an explicit stage gate
+            // before signing, separate from any keychain access biometric prompt.
+            let prefs = read_preferences(
+                &load_signing_settings().0.unwrap_or_else(|| json!({})),
+            );
+            if prefs.always_prompt_user_presence
+                && used_credential_source != SOURCE_HARDWARE_WALLET
+            {
+                match request_user_presence(reason, true) {
+                    Ok(v) if v.get("verified").and_then(Value::as_bool) == Some(true) => {}
+                    Ok(_) => {
+                        return BrokerResponse::err(
+                            id,
+                            "ERR_AUTH",
+                            "user presence verification failed",
+                        )
+                    }
+                    Err(e) => return BrokerResponse::err(id, "ERR_AUTH", e),
                 }
             }
 
@@ -1102,8 +1406,20 @@ pub(crate) fn handle_request(state: &Arc<BrokerState>, req: BrokerRequest) -> Br
                 secret.sign(tx_hash.as_ref())
             } else {
                 let record = hardware_record.expect("hardware source checked above");
-                let unsigned_tx = match borsh::to_vec(&tx) {
-                    Ok(v) => v,
+                // Serialize TransactionV0 directly — the NEAR Ledger app expects
+                // raw V0 borsh bytes without the Transaction enum discriminant.
+                let Transaction::V0(ref tx_v0) = tx else {
+                    return BrokerResponse::err(
+                        id,
+                        "ERR_INTERNAL",
+                        "hardware wallet signing requires Transaction::V0",
+                    );
+                };
+                let unsigned_tx = match borsh::to_vec(tx_v0) {
+                    Ok(v) => {
+                        log::info!("sign_transaction: hardware wallet unsigned_tx_size={}", v.len());
+                        v
+                    }
                     Err(e) => {
                         return BrokerResponse::err(
                             id,

@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::config::{
     expand_tilde_path, load_near_cli_used_accounts, near_credentials_home_dir,
@@ -9,7 +10,8 @@ use crate::config::{
 use crate::credentials::{
     collect_legacy_credentials, credential_curve_type, near_cli_secure_has_credential,
     near_cli_secure_public_keys_for_account, nearxd_keychain_accounts_for_network,
-    nearxd_keychain_has_credential, normalize_keychain_protection, normalize_source,
+    nearxd_keychain_has_credential, nearxd_keychain_has_scoped_credential,
+    normalize_keychain_protection, normalize_source,
     normalize_sources, parse_credential_from_value, read_legacy_credential,
     read_near_cli_secure_credential, read_near_credential_keychain,
     store_near_credential_keychain, ParsedNearCredential,
@@ -38,7 +40,6 @@ pub(crate) struct DiscoveredSigningKey {
     pub available_sources: BTreeSet<String>,
     pub in_nearxd_keychain: bool,
     pub nearxd_keychain_protection: Option<String>,
-    pub nearxd_keychain_import_required: bool,
     pub last_seen_at_ms: Option<u64>,
     pub stale: bool,
     pub hardware_wallet: Option<HardwareWalletIndexRecord>,
@@ -60,25 +61,16 @@ fn resolved_keychain_protection(
     )
 }
 
-fn keychain_import_required(
-    in_nearxd_keychain: bool,
-    protection: Option<&str>,
-) -> bool {
-    cfg!(target_os = "macos")
-        && in_nearxd_keychain
-        && protection != Some(KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET)
-}
-
 pub(crate) fn nearxd_keychain_state_for_key(
     settings: Option<&Value>,
     network: &str,
     account_id: &str,
     public_key: &str,
-) -> (Option<String>, bool) {
-    if !nearxd_keychain_has_credential(network, account_id, public_key) {
-        return (None, false);
+) -> Option<String> {
+    if !nearxd_keychain_has_scoped_credential(network, account_id, public_key) {
+        return None;
     }
-    let protection = if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") {
         Some(
             settings
                 .and_then(|value| {
@@ -96,9 +88,7 @@ pub(crate) fn nearxd_keychain_state_for_key(
         )
     } else {
         None
-    };
-    let import_required = keychain_import_required(true, protection.as_deref());
-    (protection, import_required)
+    }
 }
 
 pub(crate) fn ordered_sources_from_set(sources: &BTreeSet<String>) -> Vec<String> {
@@ -215,7 +205,7 @@ pub(crate) fn discover_signing_accounts(
     if let Some(settings) = settings {
         for indexed in indexed_signing_keys_for_network(settings, network) {
             let bucket = accounts.entry(indexed.account_id.clone()).or_default();
-            if nearxd_keychain_has_credential(network, &indexed.account_id, &indexed.public_key) {
+            if nearxd_keychain_has_scoped_credential(network, &indexed.account_id, &indexed.public_key) {
                 bucket.insert(SOURCE_NEARXD_KEYCHAIN.to_string());
             }
             if near_cli_secure_has_credential(network, &indexed.account_id, &indexed.public_key) {
@@ -322,7 +312,7 @@ pub(crate) fn build_signing_keys(
                     }
                     let permission = access_key_permission_to_summary(&item.access_key);
                     let mut available_sources = BTreeSet::new();
-                    if nearxd_keychain_has_credential(network, &account_id, &public_key) {
+                    if nearxd_keychain_has_scoped_credential(network, &account_id, &public_key) {
                         available_sources.insert(SOURCE_NEARXD_KEYCHAIN.to_string());
                     }
                     let has_near_cli_secure = if let Some(set) = &secure_public_keys {
@@ -356,7 +346,7 @@ pub(crate) fn build_signing_keys(
                             available_sources,
                             in_nearxd_keychain,
                             nearxd_keychain_protection: None,
-                            nearxd_keychain_import_required: false,
+
                             last_seen_at_ms: indexed_last_seen,
                             stale: false,
                             hardware_wallet,
@@ -383,7 +373,7 @@ pub(crate) fn build_signing_keys(
                 for public_key in near_cli_fallback {
                     let mut available_sources = BTreeSet::new();
                     available_sources.insert(SOURCE_NEAR_CLI_SECURE.to_string());
-                    if nearxd_keychain_has_credential(network, &account_id, &public_key) {
+                    if nearxd_keychain_has_scoped_credential(network, &account_id, &public_key) {
                         available_sources.insert(SOURCE_NEARXD_KEYCHAIN.to_string());
                     }
                     if legacy_by_key.contains_key(&(account_id.clone(), public_key.clone())) {
@@ -403,7 +393,7 @@ pub(crate) fn build_signing_keys(
                             available_sources,
                             in_nearxd_keychain,
                             nearxd_keychain_protection: None,
-                            nearxd_keychain_import_required: false,
+
                             last_seen_at_ms: indexed_record
                                 .and_then(|r| (r.last_seen_at_ms > 0).then_some(r.last_seen_at_ms)),
                             stale: false,
@@ -422,7 +412,7 @@ pub(crate) fn build_signing_keys(
             by_key.entry(public_key.clone()).or_insert_with(|| {
                 let mut available_sources = BTreeSet::new();
                 available_sources.insert(SOURCE_LEGACY_FILE.to_string());
-                if nearxd_keychain_has_credential(network, &item.credential.account_id, public_key)
+                if nearxd_keychain_has_scoped_credential(network, &item.credential.account_id, public_key)
                 {
                     available_sources.insert(SOURCE_NEARXD_KEYCHAIN.to_string());
                 }
@@ -444,7 +434,6 @@ pub(crate) fn build_signing_keys(
                     in_nearxd_keychain: available_sources.contains(SOURCE_NEARXD_KEYCHAIN),
                     available_sources,
                     nearxd_keychain_protection: None,
-                    nearxd_keychain_import_required: false,
                     last_seen_at_ms: indexed_by_key
                         .get(&(account_id.clone(), public_key.clone()))
                         .and_then(|r| (r.last_seen_at_ms > 0).then_some(r.last_seen_at_ms)),
@@ -463,7 +452,7 @@ pub(crate) fn build_signing_keys(
             by_key
                 .entry(public_key.clone())
                 .and_modify(|entry| {
-                    if nearxd_keychain_has_credential(network, &account_id, public_key) {
+                    if nearxd_keychain_has_scoped_credential(network, &account_id, public_key) {
                         entry
                             .available_sources
                             .insert(SOURCE_NEARXD_KEYCHAIN.to_string());
@@ -499,7 +488,7 @@ pub(crate) fn build_signing_keys(
                 })
                 .or_insert_with(|| {
                     let mut available_sources = BTreeSet::new();
-                    if nearxd_keychain_has_credential(network, &account_id, public_key) {
+                    if nearxd_keychain_has_scoped_credential(network, &account_id, public_key) {
                         available_sources.insert(SOURCE_NEARXD_KEYCHAIN.to_string());
                     }
                     if near_cli_secure_has_credential(network, &account_id, public_key) {
@@ -516,7 +505,6 @@ pub(crate) fn build_signing_keys(
                         in_nearxd_keychain: available_sources.contains(SOURCE_NEARXD_KEYCHAIN),
                         available_sources,
                         nearxd_keychain_protection: None,
-                        nearxd_keychain_import_required: false,
                         last_seen_at_ms,
                         stale: is_index_record_stale(indexed.last_seen_at_ms, now),
                         hardware_wallet: hardware_by_key
@@ -528,10 +516,7 @@ pub(crate) fn build_signing_keys(
 
         for entry in by_key.values_mut() {
             let indexed_record = indexed_by_key.get(&(entry.account_id.clone(), entry.public_key.clone()));
-            let protection = resolved_keychain_protection(indexed_record, entry.in_nearxd_keychain);
-            entry.nearxd_keychain_import_required =
-                keychain_import_required(entry.in_nearxd_keychain, protection.as_deref());
-            entry.nearxd_keychain_protection = protection;
+            entry.nearxd_keychain_protection = resolved_keychain_protection(indexed_record, entry.in_nearxd_keychain);
         }
 
         out.extend(by_key.into_values());
@@ -739,6 +724,16 @@ pub(crate) fn list_near_signing_keys_result(
         let importable = !key.in_nearxd_keychain
             && (key.available_sources.contains(SOURCE_LEGACY_FILE)
                 || key.available_sources.contains(SOURCE_NEAR_CLI_SECURE));
+        let security_level = if key.hardware_wallet.is_some() {
+            "hardware"
+        } else if key.in_nearxd_keychain
+            && key.nearxd_keychain_protection.as_deref()
+                == Some(KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET)
+        {
+            "secure"
+        } else {
+            "basic"
+        };
         out_keys.push(json!({
             "account_id": key.account_id,
             "public_key": key.public_key,
@@ -749,8 +744,8 @@ pub(crate) fn list_near_signing_keys_result(
             "preferred_source": preferred_source,
             "in_nearxd_keychain": key.in_nearxd_keychain,
             "nearxd_keychain_protection": key.nearxd_keychain_protection,
-            "nearxd_keychain_import_required": key.nearxd_keychain_import_required,
             "importable": importable,
+            "security_level": security_level,
             "last_seen_at_ms": key.last_seen_at_ms,
             "stale": key.stale,
             "hardware_wallet": key.hardware_wallet.as_ref().map(|record| json!({
@@ -772,6 +767,7 @@ pub(crate) fn list_near_signing_keys_result(
 pub(crate) fn import_near_signing_keys_result(
     params: &Value,
     forced_sources: Option<Vec<String>>,
+    settings_lock: &Mutex<()>,
 ) -> Result<Value, (&'static str, String)> {
     let network =
         crate::broker::resolve_network_param(params, "testnet").map_err(|e| ("ERR_PARAMS", e))?;
@@ -1024,14 +1020,13 @@ pub(crate) fn import_near_signing_keys_result(
                     &network,
                     &candidate.credential.account_id,
                     &candidate.credential.public_key,
-                )
-                .0;
+                );
             }
         }
 
         let mut sources = vec![candidate.source.clone()];
-        let in_nearxd_keychain = persist_in_keychain && keychain_status.starts_with("stored")
-            || keychain_status == "skipped_existing";
+        let in_nearxd_keychain = persist_in_keychain
+            && (keychain_status.starts_with("stored") || keychain_status == "skipped_existing");
         if in_nearxd_keychain {
             sources.push(SOURCE_NEARXD_KEYCHAIN.to_string());
         }
@@ -1075,7 +1070,8 @@ pub(crate) fn import_near_signing_keys_result(
         "source": "none",
     });
     if save_settings {
-        let mut settings = settings_before.unwrap_or_else(|| json!({}));
+        let _guard = settings_lock.lock().unwrap();
+        let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
         if !settings.is_object() {
             settings = json!({});
         }
@@ -1103,7 +1099,7 @@ pub(crate) fn import_near_signing_keys_result(
         }
         upsert_signing_key_index(&mut settings, &index_updates);
 
-        match persist_signing_settings(&settings, true) {
+        match persist_signing_settings(&settings) {
             Ok(source) => {
                 settings_save = json!({
                     "saved": true,
@@ -1118,6 +1114,7 @@ pub(crate) fn import_near_signing_keys_result(
                 });
             }
         }
+        drop(_guard);
     }
 
     Ok(json!({
@@ -1138,6 +1135,7 @@ pub(crate) fn import_near_signing_keys_result(
 
 pub(crate) fn reprotect_near_signing_key_result(
     params: &Value,
+    settings_lock: &Mutex<()>,
 ) -> Result<Value, (&'static str, String)> {
     let network =
         crate::broker::resolve_network_param(params, "mainnet").map_err(|e| ("ERR_PARAMS", e))?;
@@ -1159,7 +1157,7 @@ pub(crate) fn reprotect_near_signing_key_result(
         .map_err(|e| ("ERR_PARAMS", format!("invalid public_key: {e}")))?;
 
     let reason = crate::broker::parse_string(params, "reason")
-        .unwrap_or("NEARx needs your approval to import this NEAR key into Keychain.");
+        .unwrap_or("NEARx needs your approval to strengthen protection of this key in Keychain.");
 
     let credential = read_near_credential_keychain(&network, &account_id, Some(public_key), reason)
         .map_err(|e| ("ERR_AUTH", e))?;
@@ -1177,12 +1175,13 @@ pub(crate) fn reprotect_near_signing_key_result(
         && keychain_protection.as_deref() != Some(KEYCHAIN_PROTECTION_BIOMETRY_CURRENT_SET)
     {
         return Err((
-            "ERR_IMPORT_REQUIRED",
+            "ERR_KEYCHAIN_PROTECTION_FAILED",
             "Keychain protection repair did not complete with biometric protection. Try again or choose File system / OS secrets instead."
                 .to_string(),
         ));
     }
 
+    let _guard = settings_lock.lock().unwrap();
     let mut settings = load_signing_settings().0.unwrap_or_else(|| json!({}));
     if !settings.is_object() {
         settings = json!({});
@@ -1201,7 +1200,7 @@ pub(crate) fn reprotect_near_signing_key_result(
         }],
     );
 
-    let settings_save = match persist_signing_settings(&settings, true) {
+    let settings_save = match persist_signing_settings(&settings) {
         Ok(source) => json!({
             "saved": true,
             "source": source,
@@ -1210,6 +1209,7 @@ pub(crate) fn reprotect_near_signing_key_result(
             return Err(("ERR_PERSIST", e));
         }
     };
+    drop(_guard);
 
     Ok(json!({
         "network": network,

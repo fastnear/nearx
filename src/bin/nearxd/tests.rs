@@ -23,12 +23,11 @@ use crate::hardware_wallet::{
     mock_ledger_get_public_key, DEFAULT_LEDGER_DERIVATION_PATH, HARDWARE_WALLET_TYPE_LEDGER,
 };
 use crate::keychain::{
-    keychain_delete_generic, keychain_has_generic, keychain_read_generic, keychain_write_generic,
+    keychain_delete_generic, keychain_has_generic, keychain_write_generic,
 };
 use crate::settings::{
     staking_watchlist_for_network, write_signing_settings_file, HARDWARE_WALLET_INDEX_KEY,
-    HARDWARE_WALLET_INDEX_VERSION, KEYCHAIN_SIGNING_SETTINGS_ACCOUNT,
-    KEYCHAIN_SIGNING_SETTINGS_SERVICE, SIGNING_KEY_INDEX_KEY, SIGNING_KEY_INDEX_VERSION,
+    HARDWARE_WALLET_INDEX_VERSION, SIGNING_KEY_INDEX_KEY, SIGNING_KEY_INDEX_VERSION,
     SIGNING_KEY_PRUNE_AFTER_MS, SIGNING_KEY_STALE_AFTER_MS, STAKING_WATCHLIST_KEY,
 };
 use crate::signing::{build_signing_keys, discover_signing_accounts};
@@ -1015,11 +1014,6 @@ fn list_near_signing_keys_reports_legacy_nearxd_keychain_source_and_backfills_sc
                 row.get("nearxd_keychain_protection").and_then(Value::as_str),
                 Some("unknown")
             );
-            assert_eq!(
-                row.get("nearxd_keychain_import_required")
-                    .and_then(Value::as_bool),
-                Some(true)
-            );
             assert!(keychain_has_generic(
                 KEYCHAIN_NEAR_CREDENTIAL_SERVICE,
                 &scoped_account
@@ -1038,9 +1032,9 @@ fn list_near_signing_keys_reports_legacy_nearxd_keychain_source_and_backfills_sc
 
 #[cfg(target_os = "macos")]
 #[test]
-fn sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_source() {
+fn sign_transaction_falls_back_from_unprotected_keychain_for_explicit_keychain_source() {
     if maybe_skip_keychain_integration_test(
-        "sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_source",
+        "sign_transaction_falls_back_from_unprotected_keychain_for_explicit_keychain_source",
     ) {
         return;
     }
@@ -1049,12 +1043,12 @@ fn sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_so
     let (legacy_account, public_key, _private_key, _) = match write_legacy_nearxd_test_credential(
         "testnet",
         &account_id,
-        "nearx-keychain-import-required-sign-seed",
+        "nearx-keychain-fallback-sign-seed",
     ) {
         Ok(v) => v,
         Err(err) => {
             if maybe_skip_keychain_test(
-                "sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_source",
+                "sign_transaction_falls_back_from_unprotected_keychain_for_explicit_keychain_source",
                 &err,
             ) {
                 return;
@@ -1091,10 +1085,12 @@ fn sign_transaction_rejects_unknown_keychain_protection_for_explicit_keychain_so
                     }),
                 },
             );
+            // With no fallback sources available (legacy_file/near_cli_secure),
+            // the broker returns ERR_AUTH when the keychain copy lacks biometric protection.
             assert!(!resp.ok);
             assert_eq!(
                 resp.error.as_ref().map(|e| e.code),
-                Some("ERR_IMPORT_REQUIRED")
+                Some("ERR_AUTH")
             );
         });
     }));
@@ -1479,22 +1475,6 @@ fn import_near_signing_keys_uses_near_cli_secure_fallback_when_rpc_unavailable()
 
 #[test]
 fn staking_watchlist_crud_persists_and_survives_reload() {
-    #[cfg(target_os = "macos")]
-    {
-        if keychain_read_generic(
-            KEYCHAIN_SIGNING_SETTINGS_SERVICE,
-            KEYCHAIN_SIGNING_SETTINGS_ACCOUNT,
-        )
-        .is_some()
-            && !keychain_tests_enabled()
-        {
-            eprintln!(
-                "[nearxd:test-skip] staking_watchlist_crud_persists_and_survives_reload: keychain signing settings present; set NEARXD_RUN_KEYCHAIN_TESTS=1 to run this integration assertion"
-            );
-            return;
-        }
-    }
-
     let home = mktemp_dir("nearxd-staking-watchlist");
     let home_str = home.display().to_string();
     let account_a = unique_test_account_id();
@@ -2578,4 +2558,328 @@ fn sign_transaction_supports_secp256k1_function_call_fixture() {
     if let Err(err) = result {
         std::panic::resume_unwind(err);
     }
+}
+
+// ── parse_near_actions tests ────────────────────────────────────────
+
+#[test]
+fn parse_near_actions_transfer() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "Transfer",
+        "deposit": "1000000000000000000000000"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::Transfer(_)));
+}
+
+#[test]
+fn parse_near_actions_function_call() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "FunctionCall",
+        "method_name": "ft_transfer",
+        "args": "e30=",
+        "gas": 30000000000000_u64,
+        "deposit": "1"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::FunctionCall(_)));
+}
+
+#[test]
+fn parse_near_actions_create_account() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "CreateAccount"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::CreateAccount(_)));
+}
+
+#[test]
+fn parse_near_actions_delete_account() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "DeleteAccount",
+        "beneficiary_id": "bob.near"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::DeleteAccount(_)));
+}
+
+#[test]
+fn parse_near_actions_delete_account_missing_beneficiary() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "DeleteAccount"
+    })])
+    .unwrap_err();
+    assert!(err.contains("beneficiary_id"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_delete_key() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "DeleteKey",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::DeleteKey(_)));
+}
+
+#[test]
+fn parse_near_actions_delete_key_missing_pk() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "DeleteKey"
+    })])
+    .unwrap_err();
+    assert!(err.contains("public_key"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_add_key_full_access() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "AddKey",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+        "permission": "FullAccess"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::AddKey(_)));
+}
+
+#[test]
+fn parse_near_actions_add_key_function_call() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "AddKey",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+        "permission": {
+            "type": "FunctionCall",
+            "allowance": "250000000000000000000000",
+            "receiver_id": "contract.near",
+            "method_names": ["method1", "method2"]
+        }
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::AddKey(_)));
+}
+
+#[test]
+fn parse_near_actions_add_key_function_call_null_allowance() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "AddKey",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+        "permission": {
+            "type": "FunctionCall",
+            "allowance": null,
+            "receiver_id": "contract.near"
+        }
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::AddKey(_)));
+}
+
+#[test]
+fn parse_near_actions_add_key_missing_permission() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "AddKey",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+    })])
+    .unwrap_err();
+    assert!(err.contains("permission"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_add_key_missing_receiver() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "AddKey",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+        "permission": {
+            "type": "FunctionCall"
+        }
+    })])
+    .unwrap_err();
+    assert!(err.contains("receiver_id"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_stake() {
+    use crate::broker::parse_near_actions;
+    let actions = parse_near_actions(&[json!({
+        "type": "Stake",
+        "stake": "1000000000000000000000000",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], Action::Stake(_)));
+}
+
+#[test]
+fn parse_near_actions_stake_missing_fields() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "Stake",
+        "stake": "1000"
+    })])
+    .unwrap_err();
+    assert!(err.contains("public_key"), "error: {err}");
+
+    let err = parse_near_actions(&[json!({
+        "type": "Stake",
+        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+    })])
+    .unwrap_err();
+    assert!(err.contains("stake"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_unsupported_type() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "Delegate",
+        "actions": []
+    })])
+    .unwrap_err();
+    assert!(err.contains("unsupported"), "error: {err}");
+    assert!(err.contains("Delegate"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_deploy_contract() {
+    use crate::broker::parse_near_actions;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d]; // WASM magic
+    let code_b64 = STANDARD.encode(&wasm_bytes);
+    let actions = parse_near_actions(&[json!({
+        "type": "DeployContract",
+        "code": code_b64,
+    })])
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+}
+
+#[test]
+fn parse_near_actions_deploy_contract_missing_code() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "DeployContract"
+    })])
+    .unwrap_err();
+    assert!(err.contains("code"), "error: {err}");
+}
+
+#[test]
+fn parse_near_actions_deploy_contract_invalid_base64() {
+    use crate::broker::parse_near_actions;
+    let err = parse_near_actions(&[json!({
+        "type": "DeployContract",
+        "code": "not!!valid!!base64"
+    })])
+    .unwrap_err();
+    assert!(err.contains("base64"), "error: {err}");
+}
+
+// ---- sign_transaction: sender==receiver validation for self-targeting actions ----
+
+/// Helper: build a sign_transaction request with given signer, receiver, and actions.
+fn sign_tx_request(signer: &str, receiver: &str, actions: Value) -> BrokerRequest {
+    BrokerRequest {
+        id: Some("test".into()),
+        method: "sign_transaction".into(),
+        params: json!({
+            "signer_id": signer,
+            "receiver_id": receiver,
+            "nonce": 1,
+            "block_hash": "11111111111111111111111111111111",
+            "actions": actions,
+            "network": "testnet",
+        }),
+    }
+}
+
+/// Self-targeting actions must be rejected when receiver != signer.
+#[test]
+fn sign_transaction_rejects_self_targeting_action_with_wrong_receiver() {
+    let state = Arc::new(BrokerState::new());
+
+    let self_targeting_actions = vec![
+        json!([{"type": "DeployContract", "code": "AAAA"}]),
+        json!([{"type": "Stake", "stake": "1000", "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"}]),
+        json!([{"type": "AddKey", "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp", "permission": "FullAccess"}]),
+        json!([{"type": "DeleteKey", "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"}]),
+        json!([{"type": "DeleteAccount", "beneficiary_id": "bob.testnet"}]),
+    ];
+    let expected_names = ["DeployContract", "Stake", "AddKey", "DeleteKey", "DeleteAccount"];
+
+    for (actions, expected_name) in self_targeting_actions.iter().zip(expected_names.iter()) {
+        let req = sign_tx_request("alice.testnet", "bob.testnet", actions.clone());
+        let resp = handle_request(&state, req);
+        let err = resp.error.as_ref().unwrap_or_else(|| {
+            panic!("{expected_name}: expected error when receiver != signer")
+        });
+        assert!(
+            err.message.contains("requires receiver_id to equal signer_id"),
+            "{expected_name}: unexpected error message: {}", err.message
+        );
+        assert!(
+            err.message.contains(expected_name),
+            "{expected_name}: error should name the action type: {}", err.message
+        );
+    }
+}
+
+/// Non-self-targeting actions should NOT be rejected for receiver != signer
+/// (they will fail later for missing credentials, not for the receiver check).
+#[test]
+fn sign_transaction_allows_different_receiver_for_transfer() {
+    let state = Arc::new(BrokerState::new());
+    let req = sign_tx_request(
+        "alice.testnet",
+        "bob.testnet",
+        json!([{"type": "Transfer", "deposit": "1000000000000000000000000"}]),
+    );
+    let resp = handle_request(&state, req);
+    // Should fail downstream (credential resolution), not at the receiver check.
+    let err = resp.error.as_ref().expect("expected error (no credentials)");
+    assert!(
+        !err.message.contains("requires receiver_id to equal signer_id"),
+        "Transfer should not trigger self-targeting check: {}", err.message
+    );
+}
+
+/// Mixed actions: a self-targeting action in a batch with non-self-targeting should still be caught.
+#[test]
+fn sign_transaction_rejects_mixed_batch_with_self_targeting_action() {
+    let state = Arc::new(BrokerState::new());
+    let req = sign_tx_request(
+        "alice.testnet",
+        "bob.testnet",
+        json!([
+            {"type": "Transfer", "deposit": "1000"},
+            {"type": "AddKey", "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp", "permission": "FullAccess"}
+        ]),
+    );
+    let resp = handle_request(&state, req);
+    let err = resp.error.as_ref().expect("expected error for mixed batch");
+    assert!(
+        err.message.contains("action[1]") && err.message.contains("AddKey"),
+        "should identify action[1] AddKey: {}", err.message
+    );
 }

@@ -355,44 +355,38 @@ pub(crate) fn nearxd_keychain_accounts_for_network(network: &str) -> Vec<String>
     out
 }
 
+/// Check if the keychain has a credential for the given key, including legacy
+/// entries that are not scoped by public key.  Used by the signing waterfall
+/// where a false positive just causes an extra read attempt that fails
+/// gracefully.
 pub(crate) fn nearxd_keychain_has_credential(
     network: &str,
     account_id: &str,
     public_key: &str,
 ) -> bool {
-    let scoped = nearxd_credential_account_key(network, account_id, public_key);
-    if keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped) {
+    if nearxd_keychain_has_scoped_credential(network, account_id, public_key) {
         return true;
     }
 
+    // Legacy format: <network>:<account_id> (no public_key in key name).
+    // Use has_generic (attribute-only check) to avoid triggering macOS Keychain
+    // password prompts on unsigned/ad-hoc binaries.  The actual data read and
+    // scoped-key backfill happen at signing time when the credential is needed.
     let legacy_account = nearxd_credential_account_legacy(network, account_id);
-    let Some(raw) = keychain_read_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account) else {
-        return false;
-    };
-    let credential = match parse_stored_near_credential(
-        &raw,
-        account_id,
-        &format!(
-            "nearxd keychain {} / {}",
-            KEYCHAIN_NEAR_CREDENTIAL_SERVICE, legacy_account
-        ),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!(
-                "nearxd: failed to parse legacy keychain credential for {}:{}: {}",
-                network,
-                account_id,
-                e
-            );
-            return false;
-        }
-    };
-    if credential.account_id != account_id || credential.public_key != public_key {
-        return false;
-    }
-    maybe_backfill_scoped_nearxd_keychain_credential(network, &credential);
-    true
+    keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &legacy_account)
+}
+
+/// Strict check: only returns true if a scoped keychain entry exists for the
+/// exact (network, account_id, public_key) triple.  Used by discovery
+/// (`list_near_signing_keys`) to avoid falsely marking all on-chain keys as
+/// keychain-backed when only a legacy entry exists for a different key.
+pub(crate) fn nearxd_keychain_has_scoped_credential(
+    network: &str,
+    account_id: &str,
+    public_key: &str,
+) -> bool {
+    let scoped = nearxd_credential_account_key(network, account_id, public_key);
+    keychain_has_generic(KEYCHAIN_NEAR_CREDENTIAL_SERVICE, &scoped)
 }
 
 pub(crate) fn normalize_keychain_protection(protection: &str) -> Option<&'static str> {
