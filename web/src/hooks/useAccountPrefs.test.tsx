@@ -2,23 +2,20 @@ import { act, renderHook } from "@testing-library/react";
 import { useAccountPrefs } from "./useAccountPrefs";
 
 describe("useAccountPrefs", () => {
-  it("persists the last credential source per selected key", () => {
+  it("persists the last selected account and key", () => {
     const { result, unmount } = renderHook(() => useAccountPrefs("sign"));
 
     act(() => {
-      result.current.setLastSource("alice.near", "ed25519:alice", "nearxd_keychain");
+      result.current.setLastAccount("alice.near");
+      result.current.setLastKey("ed25519:alice");
     });
 
-    expect(result.current.lastCredentialSource).toBe("nearxd_keychain");
-    expect(result.current.getLastSource("alice.near", "ed25519:alice")).toBe(
-      "nearxd_keychain",
-    );
-    expect(result.current.getLastSource("alice.near", "ed25519:bob")).toBeNull();
+    expect(result.current.lastAccountId).toBe("alice.near");
+    expect(result.current.lastPublicKey).toBe("ed25519:alice");
     unmount();
 
     const { result: nextResult } = renderHook(() => useAccountPrefs("sign"));
-    expect(nextResult.current.getLastSource("alice.near", "ed25519:alice")).toBe(
-      "nearxd_keychain",
-    );
+    expect(nextResult.current.lastAccountId).toBe("alice.near");
+    expect(nextResult.current.lastPublicKey).toBe("ed25519:alice");
   });
 });

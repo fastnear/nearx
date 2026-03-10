@@ -5,15 +5,12 @@ import {
   listNearSigningKeys,
 } from "../tauri/runtime";
 import type {
-  CredentialSource,
   SigningAccountEntry,
   SigningKeyEntry,
 } from "../tauri/runtime";
 import {
   keyHasUsableSource,
   preferSigningKey,
-  resolveCredentialSource,
-  resolveRememberedCredentialSource,
   signingKeyId,
 } from "../lib/signerSourceSelection";
 
@@ -22,24 +19,10 @@ interface UseSignerSelectionOptions {
   initialAccountId?: string;
   lastAccountId?: string | null;
   lastPublicKey?: string | null;
-  lastCredentialSource?: CredentialSource | null;
-  getLastSource: (accountId: string, publicKey: string) => CredentialSource | null;
   sortAccounts: (accounts: SigningAccountEntry[]) => SigningAccountEntry[];
   setLastAccount: (accountId: string) => void;
   setLastKey: (publicKey: string) => void;
-  setLastSource: (
-    accountId: string,
-    publicKey: string,
-    source: CredentialSource | null,
-  ) => void;
   autoLoad?: boolean;
-}
-
-interface SetSelectionParams {
-  accountId: string;
-  publicKey?: string;
-  credentialSource?: CredentialSource | null;
-  remember?: boolean;
 }
 
 function trimValue(value?: string | null): string {
@@ -51,12 +34,9 @@ export default function useSignerSelection({
   initialAccountId,
   lastAccountId,
   lastPublicKey,
-  lastCredentialSource,
-  getLastSource,
   sortAccounts,
   setLastAccount,
   setLastKey,
-  setLastSource,
   autoLoad = true,
 }: UseSignerSelectionOptions) {
   const [signingAccounts, setSigningAccounts] = useState<SigningAccountEntry[]>([]);
@@ -67,14 +47,10 @@ export default function useSignerSelection({
     trimValue(initialAccountId) || trimValue(lastAccountId),
   );
   const [selectedPublicKey, setSelectedPublicKey] = useState("");
-  const [selectedCredentialSource, setSelectedCredentialSource] =
-    useState<CredentialSource | null>(lastCredentialSource ?? null);
   const loadGenerationRef = useRef(0);
   const loadRef = useRef<((preferredAccountId?: string) => Promise<void>) | null>(null);
   const selectedAccountIdRef = useRef(selectedAccountId);
   const selectedPublicKeyRef = useRef(selectedPublicKey);
-  const selectedCredentialSourceRef = useRef(selectedCredentialSource);
-  const lastCredentialSourceRef = useRef(lastCredentialSource ?? null);
 
   useEffect(() => {
     selectedAccountIdRef.current = selectedAccountId;
@@ -84,59 +60,18 @@ export default function useSignerSelection({
     selectedPublicKeyRef.current = selectedPublicKey;
   }, [selectedPublicKey]);
 
-  useEffect(() => {
-    selectedCredentialSourceRef.current = selectedCredentialSource;
-  }, [selectedCredentialSource]);
-
-  useEffect(() => {
-    lastCredentialSourceRef.current = lastCredentialSource ?? null;
-  }, [lastCredentialSource]);
-
-  const rememberedSourceForKey = useCallback(
-    (accountId?: string | null, publicKey?: string | null) => {
-      const nextAccountId = trimValue(accountId);
-      const nextPublicKey = trimValue(publicKey);
-      if (!nextAccountId || !nextPublicKey) {
-        return lastCredentialSourceRef.current;
-      }
-      return getLastSource(nextAccountId, nextPublicKey) ?? lastCredentialSourceRef.current;
-    },
-    [getLastSource],
-  );
-
-  const setCredentialSource = useCallback(
-    (
-      source: CredentialSource | null,
-      remember = true,
-      selection?: { accountId?: string | null; publicKey?: string | null },
-    ) => {
-      selectedCredentialSourceRef.current = source;
-      setSelectedCredentialSource(source);
-      const accountId = trimValue(selection?.accountId ?? selectedAccountIdRef.current);
-      const publicKey = trimValue(selection?.publicKey ?? selectedPublicKeyRef.current);
-      if (remember && accountId && publicKey) {
-        setLastSource(accountId, publicKey, source);
-      }
-    },
-    [setLastSource],
-  );
-
   const setSelection = useCallback(
-    ({ accountId, publicKey, credentialSource, remember = true }: SetSelectionParams) => {
+    ({ accountId, publicKey }: { accountId: string; publicKey?: string }) => {
       const nextAccountId = trimValue(accountId);
       const nextPublicKey = trimValue(publicKey);
       selectedAccountIdRef.current = nextAccountId;
       selectedPublicKeyRef.current = nextPublicKey;
       setSelectedAccountId(nextAccountId);
       setSelectedPublicKey(nextPublicKey);
-      setCredentialSource(credentialSource ?? null, remember, {
-        accountId: nextAccountId,
-        publicKey: nextPublicKey,
-      });
-      if (remember && nextAccountId) {
+      if (nextAccountId) {
         setLastAccount(nextAccountId);
       }
-      if (remember && nextPublicKey) {
+      if (nextPublicKey) {
         setLastKey(nextPublicKey);
       }
     },
@@ -146,24 +81,18 @@ export default function useSignerSelection({
   const clearSelection = useCallback(() => {
     selectedAccountIdRef.current = "";
     selectedPublicKeyRef.current = "";
-    selectedCredentialSourceRef.current = null;
     setSelectedAccountId("");
     setSelectedPublicKey("");
-    setSelectedCredentialSource(null);
   }, []);
 
   const selectKey = useCallback(
-    (entry: SigningKeyEntry, preferredSource?: CredentialSource | null) => {
+    (entry: SigningKeyEntry) => {
       setSelection({
         accountId: entry.account_id,
         publicKey: entry.public_key,
-        credentialSource: resolveRememberedCredentialSource(
-          entry,
-          preferredSource ?? rememberedSourceForKey(entry.account_id, entry.public_key),
-        ),
       });
     },
-    [rememberedSourceForKey, setSelection],
+    [setSelection],
   );
 
   const load = useCallback(
@@ -222,18 +151,6 @@ export default function useSignerSelection({
         );
         if (current) {
           setSelectedPublicKey(current.public_key);
-          setCredentialSource(
-            resolveRememberedCredentialSource(
-              current,
-              selectedCredentialSourceRef.current ??
-                rememberedSourceForKey(current.account_id, current.public_key),
-            ),
-            true,
-            {
-              accountId: current.account_id,
-              publicKey: current.public_key,
-            },
-          );
           setLastKey(current.public_key);
           return;
         }
@@ -243,15 +160,11 @@ export default function useSignerSelection({
           publicKey: trimValue(lastPublicKey) || undefined,
         });
         if (fallback) {
-          selectKey(
-            fallback,
-            rememberedSourceForKey(fallback.account_id, fallback.public_key),
-          );
+          selectKey(fallback);
           return;
         }
 
         setSelectedPublicKey("");
-        setCredentialSource(null, false);
       } catch (err) {
         if (generation === loadGenerationRef.current) {
           setLoadError(err instanceof Error ? err.message : String(err));
@@ -267,12 +180,10 @@ export default function useSignerSelection({
       initialAccountId,
       lastAccountId,
       lastPublicKey,
-      rememberedSourceForKey,
       network,
       selectKey,
       setLastAccount,
       setLastKey,
-      setCredentialSource,
       sortAccounts,
     ],
   );
@@ -287,6 +198,9 @@ export default function useSignerSelection({
       }
       selectedAccountIdRef.current = nextAccountId;
       setSelectedAccountId(nextAccountId);
+      setKeys([]);
+      setSelectedPublicKey("");
+      selectedPublicKeyRef.current = "";
       await load(nextAccountId);
     },
     [clearSelection, load],
@@ -313,30 +227,6 @@ export default function useSignerSelection({
     [keys, selectedAccountId, selectedPublicKey],
   );
 
-  useEffect(() => {
-    if (!selectedEntry) {
-      return;
-    }
-    if (
-      selectedCredentialSource &&
-      selectedEntry.available_sources.includes(selectedCredentialSource)
-    ) {
-      return;
-    }
-    setCredentialSource(
-      resolveCredentialSource(
-        selectedEntry,
-        selectedCredentialSourceRef.current ??
-          rememberedSourceForKey(selectedEntry.account_id, selectedEntry.public_key),
-      ),
-      true,
-      {
-        accountId: selectedEntry.account_id,
-        publicKey: selectedEntry.public_key,
-      },
-    );
-  }, [rememberedSourceForKey, selectedCredentialSource, selectedEntry, setCredentialSource]);
-
   const allSignableKeys = useMemo(
     () => keys.filter((key) => keyHasUsableSource(key)),
     [keys],
@@ -357,11 +247,9 @@ export default function useSignerSelection({
     selectAccount,
     selectKey,
     selectedAccountId,
-    selectedCredentialSource,
     selectedEntry,
     selectedKeyId,
     selectedPublicKey,
-    setCredentialSource,
     setSelection,
     signingAccounts,
   };
