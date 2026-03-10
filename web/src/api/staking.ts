@@ -14,6 +14,7 @@ const DEFAULT_RPC_URL =
     ? "https://rpc.testnet.fastnear.com"
     : "https://rpc.mainnet.fastnear.com";
 const POOL_BALANCE_CONCURRENCY = 4;
+const SIGN_TIMEOUT_MS = 30_000;
 
 export interface ValidatorInfo {
   account_id: string;
@@ -62,7 +63,7 @@ export async function getValidators(): Promise<ValidatorInfo[]> {
       throw new Error(message);
     }
     return parsed;
-  });
+  }, { retries: 4, baseDelayMs: 500, maxDelayMs: 4_000 });
   return json.result.current_validators as ValidatorInfo[];
 }
 
@@ -176,31 +177,49 @@ export async function executeStakingAction(
       break;
   }
 
-  const signResult = await signTransaction({
-    signer_id: params.signerId,
-    signer_public_key: params.publicKey,
-    credential_source: params.credentialSource,
-    receiver_id: params.poolId,
-    nonce: ak.nonce + 1,
-    block_hash: ak.block_hash,
-    actions: [
-      {
-        type: "FunctionCall",
-        method_name: methodName,
-        args: btoa(JSON.stringify(args)),
-        gas: FIFTY_TGAS,
-        deposit,
-      },
-    ],
-    network: networkId,
-    reason: params.reason,
-  });
+  console.log("[staking] access key: nonce=%d block_hash=%s", ak.nonce, ak.block_hash);
+  let signTimeout: ReturnType<typeof setTimeout> | undefined;
+  const signResult = await Promise.race([
+    signTransaction({
+      signer_id: params.signerId,
+      signer_public_key: params.publicKey,
+      credential_source: params.credentialSource,
+      receiver_id: params.poolId,
+      nonce: ak.nonce + 1,
+      block_hash: ak.block_hash,
+      actions: [
+        {
+          type: "FunctionCall",
+          method_name: methodName,
+          args: btoa(JSON.stringify(args)),
+          gas: FIFTY_TGAS,
+          deposit,
+        },
+      ],
+      network: networkId,
+      reason: params.reason,
+    }).finally(() => clearTimeout(signTimeout)),
+    new Promise<never>((_resolve, reject) => {
+      signTimeout = setTimeout(() => reject(new Error(
+        params.credentialSource === "hardware_wallet"
+          ? "Ledger signing timed out. Keep the device unlocked with the NEAR app open, then try again."
+          : "Signing timed out. Please try again.",
+      )), SIGN_TIMEOUT_MS);
+    }),
+  ]);
 
+  console.log(
+    "[staking] signed tx_hash:", signResult.tx_hash,
+    "source:", signResult.credential_source,
+    "signed_tx_b64_len:", signResult.signed_transaction_base64.length,
+  );
   try {
     const broadcastResult = await broadcastTransaction(signResult.signed_transaction_base64);
+    console.log("[staking] broadcast result:", broadcastResult);
     return { txHash: signResult.tx_hash, broadcastResult };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error("[staking] broadcast failed:", message, err);
     throw new StakingBroadcastError(message, signResult.tx_hash);
   }
 }

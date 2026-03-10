@@ -193,6 +193,8 @@ export interface HardwareWalletDescriptor {
   derivation_path: string;
 }
 
+export type SecurityLevel = "secure" | "hardware" | "basic";
+
 export interface SigningKeyEntry {
   account_id: string;
   public_key: string;
@@ -203,8 +205,8 @@ export interface SigningKeyEntry {
   preferred_source: CredentialSource | null;
   in_nearxd_keychain: boolean;
   nearxd_keychain_protection?: NearxdKeychainProtection | null;
-  nearxd_keychain_import_required?: boolean;
   importable: boolean;
+  security_level?: SecurityLevel;
   last_seen_at_ms?: number | null;
   stale?: boolean;
   hardware_wallet?: HardwareWalletDescriptor | null;
@@ -399,10 +401,20 @@ export interface SignTransactionParams {
   block_hash: string;
   actions: Array<{
     type: string;
-    deposit?: string;
-    method_name?: string;
-    args?: string;
-    gas?: number;
+    deposit?: string;           // Transfer
+    code?: string;              // DeployContract (base64)
+    method_name?: string;       // FunctionCall
+    args?: string;              // FunctionCall
+    gas?: number;               // FunctionCall
+    beneficiary_id?: string;    // DeleteAccount
+    public_key?: string;        // DeleteKey, AddKey, Stake
+    permission?: "FullAccess" | {  // AddKey
+      type: "FunctionCall";
+      allowance?: string | null;
+      receiver_id: string;
+      method_names?: string[];
+    };
+    stake?: string;             // Stake
   }>;
   network?: string;
   reason?: string;
@@ -506,6 +518,54 @@ export async function connectHardwareWallet(
   params: ConnectHardwareWalletParams,
 ): Promise<ConnectHardwareWalletResult> {
   return invoke<ConnectHardwareWalletResult>("connect_hardware_wallet", { params });
+}
+
+export interface UserPreferences {
+  always_prompt_user_presence: boolean;
+  last_wasm_directory?: string | null;
+}
+
+export interface GetPreferencesResult {
+  preferences: UserPreferences;
+  source: string;
+}
+
+export interface SetPreferencesResult {
+  stored: boolean;
+  source: string;
+  preferences: UserPreferences;
+}
+
+export async function getPreferences(): Promise<GetPreferencesResult> {
+  return invoke<GetPreferencesResult>("get_preferences");
+}
+
+export async function setPreferences(
+  preferences: UserPreferences,
+): Promise<SetPreferencesResult> {
+  return invoke<SetPreferencesResult>("set_preferences", {
+    params: {
+      always_prompt_user_presence: preferences.always_prompt_user_presence,
+      ...(preferences.last_wasm_directory != null
+        ? { last_wasm_directory: preferences.last_wasm_directory }
+        : {}),
+    },
+  });
+}
+
+export interface WasmFileResult {
+  file_name: string;
+  file_size: number;
+  code_base64: string;
+  directory: string | null;
+}
+
+export async function pickWasmFile(
+  defaultDir?: string | null,
+): Promise<WasmFileResult | null> {
+  return invoke<WasmFileResult | null>("pick_wasm_file", {
+    defaultDir: defaultDir ?? undefined,
+  });
 }
 
 export async function subscribeDeepLinks(
