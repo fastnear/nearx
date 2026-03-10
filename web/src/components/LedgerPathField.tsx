@@ -78,7 +78,7 @@ export default function LedgerPathField({
             value={slotValue}
             onChange={(e) => setSlot(e.target.value)}
             disabled={disabled}
-            className="w-16 rounded border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            className="w-16 rounded-md border border-gray-300 bg-surface px-2 py-1 font-mono text-[11px] text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
             aria-label="Ledger path slot"
             placeholder="1"
           />
@@ -106,7 +106,7 @@ export default function LedgerPathField({
                 className={`rounded border px-1.5 py-0.5 font-mono text-[11px] ${
                   slot === (normalizeSlotInput(slotValue) || "1")
                     ? "border-blue-300 bg-blue-50 text-blue-700"
-                    : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                    : "border-gray-300 text-gray-600 hover:bg-gray-50"
                 } disabled:opacity-50`}
               >
                 {slot}
@@ -122,7 +122,7 @@ export default function LedgerPathField({
             value={value}
             onChange={(e) => onChange(e.target.value)}
             disabled={disabled}
-            className="min-w-[240px] rounded border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            className="min-w-[240px] rounded-md border border-gray-300 bg-surface px-2 py-1 font-mono text-[11px] text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
             placeholder={buildLedgerPath("1")}
             aria-label="Custom Ledger derivation path"
           />
@@ -132,7 +132,7 @@ export default function LedgerPathField({
         type="button"
         onClick={toggleCustomMode}
         disabled={disabled}
-        className="rounded border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+        className="rounded-md border border-gray-300 px-2 py-1 text-[11px] text-gray-600 transition-colors hover:bg-gray-50 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
       >
         {customMode ? "Use assigned path" : "Custom path"}
       </button>

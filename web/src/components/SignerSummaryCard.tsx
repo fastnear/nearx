@@ -40,29 +40,29 @@ export default function SignerSummaryCard({
   controls,
 }: SignerSummaryCardProps) {
   return (
-    <div className="mb-4 rounded-lg border border-gray-200 bg-surface text-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-4 py-4">
-        <div className="min-w-0 flex-1">
+    <div className="mb-4 rounded-lg border border-gray-200 bg-surface shadow-sm text-sm">
+      <div className="border-b border-gray-100 px-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-base font-medium text-gray-900">{title}</h2>
-          {message ? <div className="mt-1 text-sm text-gray-500">{message}</div> : null}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {actions}
+            <span
+              className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(statusTone)}`}
+            >
+              {statusLabel}
+            </span>
+          </div>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {actions}
-          <span
-            className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(statusTone)}`}
-          >
-            {statusLabel}
-          </span>
-        </div>
+        {message ? <div className="mt-2 text-sm text-gray-500">{message}</div> : null}
       </div>
       {controls}
-      <dl className="grid gap-x-8 gap-y-4 px-4 py-4 sm:grid-cols-2">
+      <dl className="grid grid-cols-2 gap-x-8 gap-y-3 px-4 py-4 sm:grid-cols-3">
         {items.map((item) => (
           <div key={item.label} className="min-w-0">
             <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">
               {item.label}
             </dt>
-            <dd className="mt-1 min-h-[1.5rem] min-w-0 break-words text-base text-gray-900">
+            <dd className="mt-1 min-h-[1.5rem] min-w-0 break-words text-sm text-gray-900">
               {item.value}
             </dd>
           </div>

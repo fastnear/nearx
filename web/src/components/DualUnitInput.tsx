@@ -12,7 +12,7 @@ interface DualUnitInputProps {
 }
 
 const inputClass =
-  "w-full rounded border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none";
+  "w-full rounded-md border border-gray-300 bg-surface px-2.5 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none";
 
 export default function DualUnitInput({
   label,

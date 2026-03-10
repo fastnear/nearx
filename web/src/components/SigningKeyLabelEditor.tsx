@@ -5,6 +5,7 @@ import {
 } from "../tauri/runtime";
 import type {
   CredentialSource,
+  SetSigningKeyLabelResult,
   SigningKeyEntry,
 } from "../tauri/runtime";
 
@@ -21,7 +22,7 @@ interface SigningKeyLabelEditorProps {
   entry: SigningKeyEntry | null;
   network: string;
   disabled?: boolean;
-  onSaved?: () => void | Promise<void>;
+  onSaved?: (result: SetSigningKeyLabelResult) => void;
 }
 
 function buildLabelSuggestions(entry: SigningKeyEntry | null): string[] {
@@ -73,7 +74,7 @@ export default function SigningKeyLabelEditor({
     setMessage(null);
     setError(null);
     try {
-      await setSigningKeyLabel({
+      const result = await setSigningKeyLabel({
         network,
         account_id: currentEntry.account_id,
         public_key: currentEntry.public_key,
@@ -83,7 +84,7 @@ export default function SigningKeyLabelEditor({
         setDraft(label);
       }
       if (onSaved) {
-        await onSaved();
+        onSaved(result);
       }
       setMessage(label ? "Label saved." : "Label cleared.");
     } catch (err) {
@@ -108,7 +109,7 @@ export default function SigningKeyLabelEditor({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           disabled={disabled || saving}
-          className="min-w-[220px] flex-1 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+          className="min-w-[220px] flex-1 rounded-md border border-gray-300 bg-surface px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
           placeholder="Primary staking key"
           maxLength={64}
           aria-label="Signer key label"
@@ -122,7 +123,7 @@ export default function SigningKeyLabelEditor({
           type="button"
           onClick={() => void saveLabel()}
           disabled={disabled || saving || !dirty}
-          className="rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none disabled:opacity-50"
         >
           {saving ? "Saving..." : "Save Label"}
         </button>
@@ -130,7 +131,7 @@ export default function SigningKeyLabelEditor({
           type="button"
           onClick={() => void saveLabel("")}
           disabled={disabled || saving || !currentLabel}
-          className="rounded border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
         >
           Clear
         </button>
@@ -142,10 +143,10 @@ export default function SigningKeyLabelEditor({
             type="button"
             onClick={() => setDraft(suggestion)}
             disabled={disabled || saving}
-            className={`rounded border px-2.5 py-1 text-xs ${
+            className={`rounded-md border px-2.5 py-1 text-xs ${
               draft.trim() === suggestion
                 ? "border-blue-300 bg-blue-50 text-blue-700"
-                : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                : "border-gray-300 text-gray-600 hover:bg-gray-50"
             } disabled:opacity-50`}
           >
             {suggestion}

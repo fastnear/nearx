@@ -88,7 +88,7 @@ export default function LedgerConnectionPanel({
                 className={`rounded-full px-3 py-1.5 text-sm font-medium ${
                   !tiedToSelectedAccount
                     ? "bg-blue-600 text-white"
-                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    : "border border-gray-300 text-gray-600 hover:bg-gray-50"
                 }`}
               >
                 Implicit account
@@ -99,7 +99,7 @@ export default function LedgerConnectionPanel({
                 className={`rounded-full px-3 py-1.5 text-sm font-medium ${
                   tiedToSelectedAccount
                     ? "bg-blue-600 text-white"
-                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    : "border border-gray-300 text-gray-600 hover:bg-gray-50"
                 }`}
               >
                 Bind to selected account
@@ -110,7 +110,7 @@ export default function LedgerConnectionPanel({
 
           {tiedToSelectedAccount ? (
             <div
-              className={`rounded border px-3 py-2.5 text-sm ${
+              className={`rounded-lg border px-4 py-3 text-sm ${
                 selectedAccount
                   ? "border-blue-100 bg-blue-50 text-blue-700"
                   : "border-amber-200 bg-amber-50 text-amber-700"
@@ -121,7 +121,7 @@ export default function LedgerConnectionPanel({
                 : `Select a ${selectedAccountKind} above before connecting this Ledger key.`}
             </div>
           ) : (
-            <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-700">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
               NEARx will derive the standalone implicit account from the Ledger public key. The
               key does not need to be preselected above.
             </div>
@@ -137,7 +137,7 @@ export default function LedgerConnectionPanel({
               type="button"
               onClick={onConnect}
               disabled={effectiveDisabled || connecting}
-              className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none disabled:opacity-50"
             >
               <Usb size={13} />
               {connecting ? "Connecting..." : connectLabel}
@@ -145,7 +145,7 @@ export default function LedgerConnectionPanel({
           </div>
 
           {accountBinding === "implicit_account" && implicitAccountId && (
-            <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-800">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
               Derived implicit account: <span className="font-mono">{implicitAccountId}</span>
               {publicKey ? (
                 <>
@@ -157,20 +157,20 @@ export default function LedgerConnectionPanel({
           )}
 
           {accountBinding === "selected_account" && selectedAccount && publicKey && (
-            <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-800">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
               Ledger key <span className="font-mono">{publicKey}</span> is bound to{" "}
               <span className="font-mono">{selectedAccount}</span>.
             </div>
           )}
 
           {message && (
-            <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-800">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
               {message}
             </div>
           )}
 
           {error && (
-            <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               <div>{error}</div>
               {errorActions ? <div className="mt-2">{errorActions}</div> : null}
             </div>

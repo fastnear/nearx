@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import type { ComponentType, SVGProps } from "react";
-import { Blocks, Landmark } from "lucide-react";
+import { Blocks, Landmark, Settings } from "lucide-react";
 import { isTauriRuntime } from "../tauri/runtime";
 
 function TxIcon({ className }: SVGProps<SVGSVGElement>) {
@@ -18,9 +18,10 @@ const tabs: Array<{
   match: (p: string) => boolean;
   tauriOnly?: boolean;
 }> = [
-  { to: "/", icon: Blocks, label: "Explorer", match: (p) => !p.startsWith("/staking") && !p.startsWith("/sign") },
+  { to: "/", icon: Blocks, label: "Explorer", match: (p) => !p.startsWith("/staking") && !p.startsWith("/sign") && !p.startsWith("/settings") },
   { to: "/staking", icon: Landmark, label: "Staking", match: (p) => p.startsWith("/staking"), tauriOnly: true },
   { to: "/sign", icon: TxIcon, label: "Sign", match: (p) => p.startsWith("/sign"), tauriOnly: true },
+  { to: "/settings", icon: Settings, label: "Settings", match: (p) => p.startsWith("/settings"), tauriOnly: true },
 ];
 
 export default function Sidebar() {

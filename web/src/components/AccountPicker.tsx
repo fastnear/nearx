@@ -1,7 +1,7 @@
-import { Star, Download, KeyRound } from "lucide-react";
+import { Star, KeyRound } from "lucide-react";
 import type { CredentialSource, SigningCapabilities, SigningKeyEntry } from "../tauri/runtime";
 import { ledgerPathBadge } from "../lib/hardwareWalletDisplay";
-import { signerSourceLabel } from "../lib/signerSourceSelection";
+import { credentialSourceLabel } from "../tauri/signingCapabilities";
 
 export interface AccountPickerKeyBadge {
   text: string;
@@ -14,10 +14,7 @@ interface AccountPickerProps {
   selectedAccountId: string;
   selectedPublicKey: string;
   onSelect: (entry: SigningKeyEntry) => void;
-  onImport?: (entry: SigningKeyEntry) => void;
   keyBadge?: (entry: SigningKeyEntry) => AccountPickerKeyBadge | null;
-  importing: boolean;
-  importingKeyId?: string;
   signingCapabilities?: SigningCapabilities | null;
   isStarred: (id: string) => boolean;
   onToggleStar: (id: string) => void;
@@ -52,10 +49,7 @@ export default function AccountPicker({
   selectedAccountId,
   selectedPublicKey,
   onSelect,
-  onImport,
   keyBadge,
-  importing,
-  importingKeyId,
   signingCapabilities,
   isStarred,
   onToggleStar,
@@ -110,12 +104,11 @@ export default function AccountPicker({
               const selected =
                 key.account_id === selectedAccountId && key.public_key === selectedPublicKey;
               const badge = keyBadge?.(key) ?? null;
-              const importId = keyId(key);
-              const importingThis = importing && importingKeyId === importId;
+              const kid = keyId(key);
               const readySource = primaryUsableSource(key);
               return (
                 <div
-                  key={importId}
+                  key={kid}
                   className={`flex cursor-pointer items-center gap-3 px-4 py-3 ${
                     selected ? "bg-blue-600/10" : "hover:bg-gray-50"
                   }`}
@@ -150,7 +143,7 @@ export default function AccountPicker({
                       </span>
                       {key.available_sources.map((source) => (
                         <span key={source} className="rounded bg-blue-50 px-1.5 py-0.5 text-blue-700">
-                          {signerSourceLabel(source, key, signingCapabilities)}
+                          {credentialSourceLabel(source, signingCapabilities)}
                         </span>
                       ))}
                       {key.hardware_wallet?.derivation_path && (
@@ -186,37 +179,18 @@ export default function AccountPicker({
                     </div>
                   </div>
                   <div className="shrink-0 text-right">
-                    {key.in_nearxd_keychain && key.nearxd_keychain_import_required ? (
-                      <span className="flex items-center justify-end gap-1 text-sm text-amber-700">
-                        <KeyRound size={11} />
-                        Fingerprint required
-                      </span>
-                    ) : key.in_nearxd_keychain ? (
+                    {key.in_nearxd_keychain ? (
                       <span className="flex items-center justify-end gap-1 text-sm text-green-600">
                         <KeyRound size={11} />
                         Ready
                       </span>
                     ) : readySource ? (
                       <span className="text-sm text-gray-600">
-                        {signerSourceLabel(readySource, key, signingCapabilities)}
+                        {credentialSourceLabel(readySource, signingCapabilities)}
                       </span>
                     ) : (
                       <span className="text-sm text-gray-400">Unavailable</span>
                     )}
-                    {!key.in_nearxd_keychain && key.importable && onImport ? (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onImport(key);
-                        }}
-                        disabled={importing}
-                        className="mt-1 flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                      >
-                        <Download size={11} />
-                        {importingThis ? "Importing…" : "Import"}
-                      </button>
-                    ) : null}
                   </div>
                 </div>
               );

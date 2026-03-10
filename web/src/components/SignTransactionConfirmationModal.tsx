@@ -56,7 +56,7 @@ export default function SignTransactionConfirmationModal({
       <div
         role="dialog"
         aria-modal="true"
-        className="w-full max-w-4xl overflow-hidden rounded-xl border border-gray-200 bg-surface shadow-2xl"
+        className="w-full max-w-4xl overflow-hidden rounded-xl border border-gray-200 bg-surface shadow-xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-5 py-4">
@@ -70,7 +70,7 @@ export default function SignTransactionConfirmationModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded border border-gray-200 p-2 text-gray-500 hover:bg-gray-50 hover:text-gray-900"
+            className="rounded-md border border-gray-300 p-2 text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-900 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
             title="Close transaction review"
           >
             <X className="size-4" />
@@ -101,7 +101,7 @@ export default function SignTransactionConfirmationModal({
           ) : null}
 
           {error ? (
-            <div className="mt-4 rounded border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-700">
+            <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
               {error}
             </div>
           ) : null}
@@ -116,7 +116,7 @@ export default function SignTransactionConfirmationModal({
               type="button"
               onClick={onClose}
               disabled={confirming}
-              className="rounded border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
             >
               Cancel
             </button>
@@ -124,7 +124,7 @@ export default function SignTransactionConfirmationModal({
               type="button"
               onClick={onSign}
               disabled={confirming}
-              className="rounded border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
             >
               {confirming ? "Signing..." : "Sign"}
             </button>
@@ -132,7 +132,7 @@ export default function SignTransactionConfirmationModal({
               type="button"
               onClick={onSignAndBroadcast}
               disabled={confirming}
-              className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none disabled:opacity-50"
             >
               {confirming ? "Signing..." : "Sign + broadcast"}
             </button>

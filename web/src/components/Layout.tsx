@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import SearchBar from "./SearchBar";
 import Sidebar from "./Sidebar";
-import { ChevronDown, Sun, Moon, Monitor } from "lucide-react";
+import { ChevronDown, Sun, Moon } from "lucide-react";
 import { networkId, otherNetworkId } from "../config";
 import { buildCrossNetworkUrl } from "../utils/networkRouting";
 import { isTauriRuntime } from "../tauri/runtime";
@@ -65,11 +65,33 @@ function applyTheme(theme: Theme) {
   document.documentElement.classList.toggle("dark", isDark);
 }
 
-const themeIcon: Record<Theme, typeof Sun> = { light: Sun, dark: Moon, system: Monitor };
 const themeLabel: Record<Theme, string> = { light: "Light", dark: "Dark", system: "System" };
+
+function useEffectiveTheme(theme: Theme): "light" | "dark" {
+  const [effective, setEffective] = useState<"light" | "dark">(() =>
+    theme === "system"
+      ? matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+      : theme
+  );
+
+  useEffect(() => {
+    if (theme !== "system") {
+      setEffective(theme);
+      return;
+    }
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    setEffective(mq.matches ? "dark" : "light");
+    const handler = () => setEffective(mq.matches ? "dark" : "light");
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [theme]);
+
+  return effective;
+}
 
 function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>(getStoredTheme);
+  const effective = useEffectiveTheme(theme);
 
   useEffect(() => {
     if (theme === "system") {
@@ -98,7 +120,7 @@ function ThemeToggle() {
     });
   }, []);
 
-  const Icon = themeIcon[theme];
+  const Icon = effective === "dark" ? Sun : Moon;
 
   return (
     <button
@@ -112,6 +134,7 @@ function ThemeToggle() {
 }
 
 function getPageTitle(pathname: string): string {
+  if (pathname.startsWith("/settings")) return "NEARx — Settings";
   if (pathname.startsWith("/staking")) return "NEARx — Staking";
   if (pathname.startsWith("/sign")) return "NEARx — Sign Transaction";
   if (pathname.startsWith("/tx/")) return "NEARx — Transaction";
@@ -151,12 +174,12 @@ export default function Layout() {
               <img src={logoSvg} alt="" width="24" height="18" />
               NEARx
             </Link>
-            <NetworkSwitcher switchUrl={switchUrl} />
-            <ThemeToggle />
             <BackForwardControls />
+            <NetworkSwitcher switchUrl={switchUrl} />
             <div className="order-last w-full sm:order-none sm:flex-1">
               <SearchBar />
             </div>
+            <ThemeToggle />
           </div>
         </header>
 
