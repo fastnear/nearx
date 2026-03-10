@@ -11,15 +11,6 @@ interface ResolveSignerSummaryStatusOptions {
   error?: string | null;
   neutralLabel?: string;
   neutralMessage?: string | null;
-  selectionRequiredLabel?: string;
-  selectionRequiredMessage?: string | null;
-  sourceNeededLabel?: string;
-  sourceNeededMessage?: string | null;
-  incompatibleLabel?: string;
-  incompatibleMessage?: string | null;
-  advisoryLabel?: string;
-  advisoryMessage?: string | null;
-  advisoryTone?: SignerSummaryTone;
   readyLabel: string;
   readyMessage: string;
 }
@@ -29,15 +20,6 @@ export function resolveSignerSummaryStatus({
   error,
   neutralLabel = "Choose signer",
   neutralMessage,
-  selectionRequiredLabel = "Signer required",
-  selectionRequiredMessage,
-  sourceNeededLabel = "Source needed",
-  sourceNeededMessage,
-  incompatibleLabel = "Signer needs attention",
-  incompatibleMessage,
-  advisoryLabel = "Heads up",
-  advisoryMessage,
-  advisoryTone = "warning",
   readyLabel,
   readyMessage,
 }: ResolveSignerSummaryStatusOptions): SignerSummaryStatus {
@@ -51,8 +33,8 @@ export function resolveSignerSummaryStatus({
 
   if (error) {
     return {
-      label: "Action blocked",
-      tone: "warning",
+      label: "Error",
+      tone: "danger",
       message: error,
     };
   }
@@ -62,38 +44,6 @@ export function resolveSignerSummaryStatus({
       label: neutralLabel,
       tone: "neutral",
       message: neutralMessage,
-    };
-  }
-
-  if (selectionRequiredMessage) {
-    return {
-      label: selectionRequiredLabel,
-      tone: "warning",
-      message: selectionRequiredMessage,
-    };
-  }
-
-  if (sourceNeededMessage) {
-    return {
-      label: sourceNeededLabel,
-      tone: "warning",
-      message: sourceNeededMessage,
-    };
-  }
-
-  if (incompatibleMessage) {
-    return {
-      label: incompatibleLabel,
-      tone: "warning",
-      message: incompatibleMessage,
-    };
-  }
-
-  if (advisoryMessage) {
-    return {
-      label: advisoryLabel,
-      tone: advisoryTone,
-      message: advisoryMessage,
     };
   }
 

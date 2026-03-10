@@ -38,6 +38,12 @@ export function summarizeBroadcastResult(
   result: unknown,
   fallbackTxHash: string,
 ): BroadcastSummary {
+  // broadcast_tx_async fallback returns a marker without execution details.
+  const record = asRecord(result);
+  if (record?.async_submitted === true) {
+    return { txHash: fallbackTxHash, success: null, statusLabel: "SUBMITTED" };
+  }
+
   const txHash =
     getString(result, ["transaction", "hash"]) ??
     getString(result, ["transaction_outcome", "id"]) ??

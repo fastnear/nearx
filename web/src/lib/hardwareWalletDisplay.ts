@@ -6,16 +6,10 @@ import type {
 } from "../tauri/runtime";
 
 export function shortPublicKey(publicKey: string): string {
-  if (publicKey.length <= 30) {
-    return publicKey;
-  }
-  return `${publicKey.slice(0, 18)}...${publicKey.slice(-8)}`;
+  return publicKey;
 }
 
 export function shortAccountId(accountId: string): string {
-  if (/^[0-9a-f]{64}$/i.test(accountId)) {
-    return `${accountId.slice(0, 12)}...${accountId.slice(-8)}`;
-  }
   return accountId;
 }
 

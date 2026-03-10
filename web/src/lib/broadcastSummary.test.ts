@@ -19,6 +19,19 @@ describe("summarizeBroadcastResult", () => {
     });
   });
 
+  it("returns submitted status for async_submitted results", () => {
+    const summary = summarizeBroadcastResult(
+      { async_submitted: true },
+      "async-fallback-hash",
+    );
+
+    expect(summary).toEqual({
+      txHash: "async-fallback-hash",
+      success: null,
+      statusLabel: "SUBMITTED",
+    });
+  });
+
   it("falls back to the signed tx hash on broadcast failure summaries", () => {
     const summary = summarizeBroadcastResult(
       {

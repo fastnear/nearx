@@ -1,11 +1,10 @@
 import { resolveSignerSummaryStatus } from "./signerSummaryStatus";
 
 describe("resolveSignerSummaryStatus", () => {
-  it("prioritizes ledger and blocking errors ahead of ready state", () => {
+  it("prioritizes ledger errors ahead of ready state", () => {
     const status = resolveSignerSummaryStatus({
       hardwareError: "Reconnect Ledger.",
       error: "Blocked.",
-      selectionRequiredMessage: "Pick a signer.",
       readyLabel: "Ready",
       readyMessage: "All set.",
     });
@@ -14,6 +13,20 @@ describe("resolveSignerSummaryStatus", () => {
       label: "Ledger attention",
       tone: "warning",
       message: "Reconnect Ledger.",
+    });
+  });
+
+  it("shows error when present", () => {
+    const status = resolveSignerSummaryStatus({
+      error: "Something went wrong.",
+      readyLabel: "Ready",
+      readyMessage: "All set.",
+    });
+
+    expect(status).toEqual({
+      label: "Error",
+      tone: "danger",
+      message: "Something went wrong.",
     });
   });
 
@@ -30,18 +43,17 @@ describe("resolveSignerSummaryStatus", () => {
     });
   });
 
-  it("supports advisory warnings without treating them as hard errors", () => {
+  it("shows neutral state when neutral message is set", () => {
     const status = resolveSignerSummaryStatus({
-      advisoryLabel: "Fingerprint off",
-      advisoryMessage: "Fingerprint verification is not used for File system.",
+      neutralMessage: "Select an account to get started.",
       readyLabel: "Ready",
       readyMessage: "All set.",
     });
 
     expect(status).toEqual({
-      label: "Fingerprint off",
-      tone: "warning",
-      message: "Fingerprint verification is not used for File system.",
+      label: "Choose signer",
+      tone: "neutral",
+      message: "Select an account to get started.",
     });
   });
 });
