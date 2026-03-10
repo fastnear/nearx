@@ -1,19 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Download, KeyRound, ChevronUp, Plus, Settings2, Trash2, Usb } from "lucide-react";
+import { Check, ChevronUp, Plus, Trash2, Usb } from "lucide-react";
 import {
-  importNearSigningKeys,
   listStakingWatchlist,
   addStakingWatchlistAccount,
   removeStakingWatchlistAccount,
   connectHardwareWallet,
   getSigningCapabilitiesCached,
   isTauriRuntime,
-  reprotectNearSigningKey,
 } from "../tauri/runtime";
 import type {
   ConnectHardwareWalletResult,
-  CredentialSource,
   SigningCapabilities,
   SigningKeyEntry,
   StakingWatchlistEntry,
@@ -29,54 +26,31 @@ import type { ValidatorInfo, PoolBalance } from "../api/staking";
 import { networkId } from "../config";
 import NearAmount from "../components/NearAmount";
 import AccountId from "../components/AccountId";
-import AccountPicker from "../components/AccountPicker";
-import LedgerConnectionPanel from "../components/LedgerConnectionPanel";
-import SigningKeyLabelEditor from "../components/SigningKeyLabelEditor";
-import ManageSignerPanel from "../components/ManageSignerPanel";
 import SignerSummaryCard from "../components/SignerSummaryCard";
 import SignerQuickSelectors from "../components/SignerQuickSelectors";
+import CopyableValue from "../components/CopyableValue";
 import { useAccountPrefs } from "../hooks/useAccountPrefs";
 import useSignerSelection from "../hooks/useSignerSelection";
 import { resolveSignerSummaryStatus } from "../lib/signerSummaryStatus";
-import {
-  keychainUpgradeFallbackMessage,
-  isUpgradeEligible,
-  resolveSourceUpgradeKind,
-  upgradeButtonLabel,
-  upgradeLoadingLabel,
-} from "../lib/sourceUpgrade";
 import type { BroadcastSummary } from "../lib/broadcastSummary";
 import { summarizeBroadcastResult } from "../lib/broadcastSummary";
-import {
-  availableImportSources,
-  buildImportParams,
-  credentialSourceLabel,
-  DEFAULT_LEDGER_DERIVATION_PATH,
-  secureStorageLabel,
-  secureStoreBackendLabel,
-} from "../tauri/signingCapabilities";
 import {
   permissionLabel,
   signingAccountOptionLabel,
   signingKeyOptionLabel,
   stakingWatchlistMeta,
   stakingWatchlistOptionLabel,
-  shortPublicKey,
 } from "../lib/hardwareWalletDisplay";
 import {
-  fallbackLocalSource,
   preferSigningKey,
-  resolveCredentialSource,
-  signerSourceLabel,
-  signerSourceOptions as signerSourceOptionsForKey,
   signingKeyId,
 } from "../lib/signerSourceSelection";
 import {
   ledgerHardwareErrorMessage,
   snapshotFromConnectResult,
   type ConnectedLedgerSnapshot,
-  type SignerModalTab,
 } from "../lib/ledgerConnectionUi";
+import LedgerConnectionPanel from "../components/LedgerConnectionPanel";
 
 type ActionKind = "deposit_and_stake" | "unstake" | "unstake_all" | "withdraw" | "withdraw_all";
 
@@ -88,16 +62,8 @@ interface ExpandedRow {
 const NEAR_DECIMALS = 24;
 const DEV_LOG = import.meta.env.DEV;
 
-function devLog(...args: unknown[]) {
-  if (DEV_LOG) console.log(...args);
-}
-
 function devWarn(...args: unknown[]) {
   if (DEV_LOG) console.warn(...args);
-}
-
-function devError(...args: unknown[]) {
-  if (DEV_LOG) console.error(...args);
 }
 
 function nearToYocto(near: string): string {
@@ -123,39 +89,31 @@ export default function Staking() {
   const [watchlistLoading, setWatchlistLoading] = useState(isTauriRuntime());
   const [watchlistInput, setWatchlistInput] = useState("");
   const {
+    starredAccounts,
     lastAccountId,
     lastPublicKey,
-    lastCredentialSource,
-    getLastSource,
-    toggleStar,
     setLastAccount,
     setLastKey,
-    setLastSource,
     sortAccounts,
-    isStarred,
+    toggleStar,
   } = useAccountPrefs("staking");
-  const [showAllKeys, setShowAllKeys] = useState(false);
-  const [importSources, setImportSources] = useState<CredentialSource[]>([
-    "legacy_file",
-    "near_cli_secure",
-  ]);
+  const [showAllKeys] = useState(false);
   const [signingCapabilities, setSigningCapabilities] = useState<SigningCapabilities | null>(null);
-  const [ledgerConnecting, setLedgerConnecting] = useState(false);
   const [showLedgerPanel, setShowLedgerPanel] = useState(false);
   const [ledgerTiedToSelectedAccount, setLedgerTiedToSelectedAccount] = useState(false);
-  const [ledgerDerivationPath, setLedgerDerivationPath] = useState(
-    DEFAULT_LEDGER_DERIVATION_PATH,
-  );
   const [ledgerConnection, setLedgerConnection] =
     useState<ConnectHardwareWalletResult | null>(null);
   const [hardwareMsg, setHardwareMsg] = useState<string | null>(null);
   const [hardwareError, setHardwareError] = useState<string | null>(null);
+  const [ledgerConnecting, setLedgerConnecting] = useState(false);
+  const [ledgerDerivationPath, setLedgerDerivationPath] = useState("44'/397'/0'/0'/1'");
 
   const [poolBalances, setPoolBalances] = useState<PoolBalance[]>([]);
   const [validators, setValidators] = useState<ValidatorInfo[]>([]);
   const [loadProgress, setLoadProgress] = useState<{ done: number; total: number } | null>(null);
   const [dataLoading, setDataLoading] = useState(false);
   const [validatorsLoading, setValidatorsLoading] = useState(false);
+  const [validatorsError, setValidatorsError] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<ExpandedRow | null>(null);
   const [actionAmount, setActionAmount] = useState("");
@@ -163,12 +121,7 @@ export default function Staking() {
   const [actionResult, setActionResult] = useState<BroadcastSummary | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const [importing, setImporting] = useState(false);
-  const [importingKeyId, setImportingKeyId] = useState<string | undefined>();
-  const [importMsg, setImportMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showManageSigner, setShowManageSigner] = useState(false);
-  const [activeSignerTab, setActiveSignerTab] = useState<SignerModalTab>("account_key");
   const [connectedLedgerSnapshot, setConnectedLedgerSnapshot] =
     useState<ConnectedLedgerSnapshot | null>(null);
   const [ledgerNotice, setLedgerNotice] = useState<string | null>(null);
@@ -182,11 +135,9 @@ export default function Staking() {
     selectAccount: selectSignerAccount,
     selectKey: selectSignerKey,
     selectedAccountId: activeAccountId,
-    selectedCredentialSource,
     selectedEntry,
     selectedKeyId,
     selectedPublicKey: selectedKey,
-    setCredentialSource,
     setSelection: setSignerSelection,
     signingAccounts,
   } = useSignerSelection({
@@ -194,21 +145,12 @@ export default function Staking() {
     initialAccountId: initialAccount ?? lastAccountId ?? "",
     lastAccountId,
     lastPublicKey,
-    lastCredentialSource,
-    getLastSource,
     sortAccounts,
     setLastAccount,
     setLastKey,
-    setLastSource,
     autoLoad: false,
   });
 
-  const secureStoreName = secureStoreBackendLabel(signingCapabilities);
-  const storageLabel = secureStorageLabel();
-  const canImportLegacy = signingCapabilities?.supports_legacy_import ?? true;
-  const canImportNearCli = signingCapabilities?.supports_near_cli_secure ?? true;
-  const canPersistSecureStore =
-    signingCapabilities?.supports_secure_store_persistence ?? true;
   const canConnectLedger =
     signingCapabilities?.supports_hardware_wallet_connect ?? true;
 
@@ -235,11 +177,6 @@ export default function Staking() {
       .then((caps) => {
         if (cancelled) return;
         setSigningCapabilities(caps);
-        const allowed = availableImportSources(caps);
-        setImportSources((prev) => {
-          const next = prev.filter((source) => allowed.includes(source));
-          return next.length > 0 ? next : allowed;
-        });
       })
       .catch(() => {});
     return () => {
@@ -287,10 +224,6 @@ export default function Staking() {
     setError(loadError);
   }, [loadError]);
 
-  const visibleKeys = useMemo(() => {
-    if (showAllKeys) return keys;
-    return keys.filter((k) => k.permission.kind === "full_access");
-  }, [keys, showAllKeys]);
   const selectedLedgerSnapshot = useMemo(() => {
     if (!connectedLedgerSnapshot) {
       return null;
@@ -298,33 +231,18 @@ export default function Staking() {
     const matchesSelectedKey =
       activeAccountId.trim() === connectedLedgerSnapshot.accountId &&
       selectedKey.trim() === connectedLedgerSnapshot.publicKey;
-    const matchesHardwareSelection =
-      selectedCredentialSource === "hardware_wallet" &&
+    const matchesAccount =
       activeAccountId.trim() === connectedLedgerSnapshot.accountId;
-    return matchesSelectedKey || matchesHardwareSelection ? connectedLedgerSnapshot : null;
+    return matchesSelectedKey || matchesAccount ? connectedLedgerSnapshot : null;
   }, [
     activeAccountId,
     connectedLedgerSnapshot,
-    selectedCredentialSource,
     selectedKey,
   ]);
-  const effectiveCredentialSource = useMemo(
-    () => {
-      if (selectedEntry) {
-        return resolveCredentialSource(selectedEntry, selectedCredentialSource);
-      }
-      if (selectedLedgerSnapshot && selectedCredentialSource === "hardware_wallet") {
-        return "hardware_wallet";
-      }
-      return selectedCredentialSource;
-    },
-    [selectedCredentialSource, selectedEntry, selectedLedgerSnapshot],
+  const hasUsableSource = Boolean(
+    (selectedEntry && selectedEntry.available_sources.length > 0) || selectedLedgerSnapshot,
   );
 
-  const hasImportableKeys = useMemo(
-    () => keys.some((k) => k.importable),
-    [keys],
-  );
   const allSignableKeyOptions = useMemo(
     () =>
       allSignableKeys.map((key) => ({
@@ -338,99 +256,11 @@ export default function Staking() {
     () => selectedEntry?.permission.kind ?? selectedLedgerSnapshot?.permission.kind ?? null,
     [selectedEntry, selectedLedgerSnapshot],
   );
-  const selectedKeychainImportRequired = useMemo(
-    () =>
-      effectiveCredentialSource === "nearxd_keychain" &&
-      Boolean(selectedEntry?.nearxd_keychain_import_required),
-    [effectiveCredentialSource, selectedEntry],
-  );
-  const stakingActionReady = useMemo(
-    () =>
-      Boolean(
-        (selectedEntry || selectedLedgerSnapshot) &&
-        activeAccountId &&
-        effectiveCredentialSource &&
-        selectedPermissionKind === "full_access" &&
-        !selectedKeychainImportRequired,
-      ),
-    [
-      activeAccountId,
-      effectiveCredentialSource,
-      selectedEntry,
-      selectedKeychainImportRequired,
-      selectedLedgerSnapshot,
-      selectedPermissionKind,
-    ],
-  );
-  const selectedSourceLabel = useMemo(() => {
-    if (effectiveCredentialSource) {
-      return signerSourceLabel(
-        effectiveCredentialSource,
-        selectedEntry,
-        signingCapabilities,
-      );
-    }
-    return "Not selected";
-  }, [effectiveCredentialSource, selectedEntry, signingCapabilities]);
-  const signerSourceOptions = useMemo(() => {
-    if (selectedEntry) {
-      return signerSourceOptionsForKey(selectedEntry, signingCapabilities);
-    }
-    if (selectedLedgerSnapshot && effectiveCredentialSource === "hardware_wallet") {
-      return [
-        {
-          value: "hardware_wallet",
-          label: credentialSourceLabel("hardware_wallet", signingCapabilities),
-        },
-      ];
-    }
-    return [];
-  }, [effectiveCredentialSource, selectedEntry, selectedLedgerSnapshot, signingCapabilities]);
-  const selectedWeakSourceWarning = useMemo(() => {
-    if (
-      !selectedEntry ||
-      signingCapabilities?.platform !== "macos" ||
-      !selectedEntry.available_sources.includes("nearxd_keychain")
-    ) {
-      return null;
-    }
-    if (
-      effectiveCredentialSource === "legacy_file" ||
-      effectiveCredentialSource === "near_cli_secure"
-    ) {
-      if (selectedEntry.nearxd_keychain_import_required) {
-        return `This key has a Keychain copy, but it is not fingerprint-protected yet. NEARx is using ${credentialSourceLabel(
-          effectiveCredentialSource,
-          signingCapabilities,
-        )} instead.`;
-      }
-      return `Fingerprint verification is not used when signing from ${credentialSourceLabel(
-        effectiveCredentialSource,
-        signingCapabilities,
-      )}.`;
-    }
-    return null;
-  }, [effectiveCredentialSource, selectedEntry, signingCapabilities]);
-  const selectedWeakSourceLabel = useMemo(() => {
-    if (
-      effectiveCredentialSource === "legacy_file" ||
-      effectiveCredentialSource === "near_cli_secure"
-    ) {
-      return `Using ${credentialSourceLabel(
-        effectiveCredentialSource,
-        signingCapabilities,
-      )}`;
-    }
-    return "Fingerprint off";
-  }, [effectiveCredentialSource, signingCapabilities]);
-  const sourceUpgradeKind = useMemo(
-    () =>
-      resolveSourceUpgradeKind(
-        selectedEntry,
-        effectiveCredentialSource,
-        canPersistSecureStore,
-      ),
-    [canPersistSecureStore, effectiveCredentialSource, selectedEntry],
+  const stakingActionReady = Boolean(
+    (selectedEntry || selectedLedgerSnapshot) &&
+    activeAccountId &&
+    hasUsableSource &&
+    (selectedPermissionKind === "full_access" || selectedPermissionKind === "unknown"),
   );
   const selectedLedgerPath = useMemo(
     () =>
@@ -466,29 +296,6 @@ export default function Staking() {
       selectSignerKey(replacement);
     }
   }, [keys, lastPublicKey, selectSignerKey, selectedEntry, showAllKeys]);
-
-  useEffect(() => {
-    if (!selectedEntry) {
-      if (selectedLedgerSnapshot && selectedCredentialSource === "hardware_wallet") {
-        return;
-      }
-      if (!selectedKey) {
-        setCredentialSource(null, false);
-      }
-      return;
-    }
-    if (
-      selectedCredentialSource &&
-      selectedEntry.available_sources.includes(selectedCredentialSource) &&
-      resolveCredentialSource(selectedEntry, selectedCredentialSource) ===
-        selectedCredentialSource
-    ) {
-      return;
-    }
-    setCredentialSource(
-      resolveCredentialSource(selectedEntry, selectedCredentialSource),
-    );
-  }, [selectedCredentialSource, selectedEntry, selectedKey, selectedLedgerSnapshot, setCredentialSource]);
 
   const ensureWatchlistAccount = useCallback(
     async (
@@ -602,15 +409,20 @@ export default function Staking() {
   }, [activeAccountId]);
 
   // Fetch validators in background
+  const [validatorsRetry, setValidatorsRetry] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setValidatorsLoading(true);
+    setValidatorsError(null);
     getValidators()
       .then((v) => { if (!cancelled) setValidators(v); })
-      .catch(() => {})
+      .catch((err) => {
+        console.error("[staking] failed to load validators:", err);
+        if (!cancelled) setValidatorsError(err instanceof Error ? err.message : String(err));
+      })
       .finally(() => { if (!cancelled) setValidatorsLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [validatorsRetry]);
 
   const highlightedPools = useMemo(
     () => poolBalances.filter((p) => p.staked !== "0" || p.unstaked !== "0"),
@@ -641,15 +453,64 @@ export default function Staking() {
 
   const openLedgerHdPathPanel = useCallback(() => {
     setLedgerTiedToSelectedAccount(false);
-    setActiveSignerTab("ledger");
     setShowLedgerPanel(true);
-    setShowManageSigner(true);
     setHardwareMsg(null);
     setHardwareError(null);
     setLedgerNotice(null);
     setActionError(null);
     setError(null);
   }, []);
+
+  const handleConnectLedger = useCallback(async () => {
+    setLedgerConnecting(true);
+    setHardwareMsg(null);
+    setHardwareError(null);
+    try {
+      const result = await connectHardwareWallet({
+        network: networkId,
+        wallet_type: "ledger",
+        account_id: ledgerTiedToSelectedAccount ? activeAccountId || undefined : undefined,
+        derivation_path: ledgerDerivationPath,
+      });
+      setLedgerConnection(result);
+      const snapshot = snapshotFromConnectResult(result);
+      setConnectedLedgerSnapshot(snapshot);
+
+      const derivedAccountId = result.account_id;
+      if (isTauriRuntime()) {
+        try {
+          const updated = await addStakingWatchlistAccount({
+            network: networkId,
+            account_id: derivedAccountId,
+            source: "hardware_wallet",
+            wallet_type: "ledger",
+            public_key: result.public_key,
+            derivation_path: result.derivation_path,
+          });
+          setWatchlist(updated.entries);
+        } catch {
+          // watchlist add is best-effort
+        }
+      }
+
+      resetSignerUi();
+      await loadAccounts(derivedAccountId);
+      setHardwareMsg(
+        `Connected Ledger: ${derivedAccountId} (${result.derivation_path})`,
+      );
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setHardwareError(ledgerHardwareErrorMessage(raw));
+    } finally {
+      setLedgerConnecting(false);
+    }
+  }, [
+    activeAccountId,
+    ledgerDerivationPath,
+    ledgerTiedToSelectedAccount,
+    loadAccounts,
+    resetSignerUi,
+  ]);
 
   const highlightedPoolIds = useMemo(
     () => new Set(poolBalances.map((p) => p.poolId)),
@@ -660,137 +521,6 @@ export default function Staking() {
     () => validators.filter((v) => !highlightedPoolIds.has(v.account_id)),
     [validators, highlightedPoolIds],
   );
-
-  const handleImport = useCallback(
-    async (target?: SigningKeyEntry, overwrite = false) => {
-      if (!canPersistSecureStore) {
-        setError("OS secure storage is unavailable on this platform.");
-        return;
-      }
-      setImporting(true);
-      setImportingKeyId(
-        target ? `${target.account_id}:${target.public_key}` : undefined,
-      );
-      setImportMsg(null);
-      setError(null);
-      const sourceHints =
-        target?.available_sources.filter(
-          (s) => s !== "nearxd_keychain" && s !== "hardware_wallet",
-        ) ??
-        importSources;
-      const sources = sourceHints.length > 0 ? sourceHints : importSources;
-      const params = buildImportParams(signingCapabilities, {
-        network: networkId,
-        account_id: target?.account_id,
-        public_key: target?.public_key,
-        sources,
-        overwrite,
-      });
-      devLog("[Staking] import_near_signing_keys request:", JSON.stringify(params));
-      try {
-        const result = await importNearSigningKeys(params);
-        devLog("[Staking] import_near_signing_keys result:", JSON.stringify(result, null, 2));
-        const count = result.imported_count;
-        const targetResult = target
-          ? [...(result.imported ?? []), ...(result.skipped ?? [])].find(
-              (row) =>
-                row.account_id === target.account_id && row.public_key === target.public_key,
-            )
-          : null;
-        const keychainReadyForSelectedKey =
-          !target ||
-          signingCapabilities?.platform !== "macos" ||
-          targetResult?.keychain_protection === "biometry_current_set";
-        if (result.failed?.length > 0) {
-          devWarn("[Staking] import failures:", JSON.stringify(result.failed, null, 2));
-        }
-        if (target && !keychainReadyForSelectedKey) {
-          const fallbackSource =
-            target.available_sources.find(
-              (source) =>
-                source !== "nearxd_keychain" && source !== "hardware_wallet",
-            ) ?? null;
-          setImportMsg(
-            keychainUpgradeFallbackMessage(fallbackSource, signingCapabilities),
-          );
-        } else {
-          setImportMsg(
-            count > 0
-              ? `Imported ${count} key${count !== 1 ? "s" : ""} to ${storageLabel}`
-              : `No new keys imported (${result.skipped?.length ?? 0} skipped, ${result.failed?.length ?? 0} failed)`,
-          );
-        }
-        setLedgerNotice(null);
-        setActiveSignerTab("account_key");
-        await loadAccounts(activeAccountId || undefined);
-        if (target && keychainReadyForSelectedKey) {
-          setCredentialSource("nearxd_keychain", true, {
-            accountId: target.account_id,
-            publicKey: target.public_key,
-          });
-        } else if (target) {
-          const fallbackSource =
-            target.available_sources.find(
-              (source) =>
-                source !== "nearxd_keychain" && source !== "hardware_wallet",
-            ) ?? null;
-          setCredentialSource(fallbackSource, true, {
-            accountId: target.account_id,
-            publicKey: target.public_key,
-          });
-        }
-      } catch (err) {
-        devError("[Staking] import_near_signing_keys error:", err);
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setImporting(false);
-        setImportingKeyId(undefined);
-      }
-    },
-    [
-      activeAccountId,
-      canPersistSecureStore,
-      importSources,
-      loadAccounts,
-      setCredentialSource,
-      signingCapabilities,
-      storageLabel,
-    ],
-  );
-
-  const handleUpgradeToKeychain = useCallback(async () => {
-    if (!selectedEntry) return;
-    if (sourceUpgradeKind === "repair") {
-      setImporting(true);
-      setImportingKeyId(signingKeyId(selectedEntry));
-      setImportMsg(null);
-      setError(null);
-      try {
-        const result = await reprotectNearSigningKey({
-          network: networkId,
-          account_id: selectedEntry.account_id,
-          public_key: selectedEntry.public_key,
-          reason:
-            "NEARx needs your approval to enable fingerprint-protected Keychain signing for this signer.",
-        });
-        devLog("[Staking] reprotect_near_signing_key result:", JSON.stringify(result, null, 2));
-        setImportMsg("Enabled fingerprint-protected Keychain for the selected key.");
-        await loadAccounts(selectedEntry.account_id);
-        setCredentialSource("nearxd_keychain", true, {
-          accountId: selectedEntry.account_id,
-          publicKey: selectedEntry.public_key,
-        });
-      } catch (err) {
-        devError("[Staking] reprotect_near_signing_key error:", err);
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setImporting(false);
-        setImportingKeyId(undefined);
-      }
-      return;
-    }
-    await handleImport(selectedEntry, Boolean(selectedEntry.nearxd_keychain_import_required));
-  }, [handleImport, loadAccounts, selectedEntry, setCredentialSource, sourceUpgradeKind]);
 
   const handleAddWatchlistAccount = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -833,8 +563,6 @@ export default function Staking() {
           setSignerSelection({
             accountId: "",
             publicKey: "",
-            credentialSource: null,
-            remember: false,
           });
         }
       }
@@ -843,101 +571,9 @@ export default function Staking() {
     }
   }, [activeAccountId, resetSignerUi, selectSignerAccount, setSignerSelection]);
 
-  const handleConnectLedger = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    const accountId = activeAccountId.trim();
-    if (ledgerTiedToSelectedAccount && !accountId) {
-      setShowLedgerPanel(true);
-      setHardwareError("Select an account above before binding a Ledger key.");
-      return;
-    }
-    if (!canConnectLedger) {
-      setShowLedgerPanel(true);
-      setHardwareError("Ledger transport is unavailable on this platform.");
-      return;
-    }
-    setLedgerConnecting(true);
-    setShowLedgerPanel(true);
-    setLedgerConnection(null);
-    setConnectedLedgerSnapshot(null);
-    setHardwareMsg(null);
-    setHardwareError(null);
-    setLedgerNotice(null);
-    setError(null);
-    try {
-      const connected = await connectHardwareWallet({
-        network: networkId,
-        wallet_type: "ledger",
-        account_id: ledgerTiedToSelectedAccount ? accountId : undefined,
-        derivation_path: ledgerDerivationPath.trim() || DEFAULT_LEDGER_DERIVATION_PATH,
-      });
-      const snapshot = snapshotFromConnectResult(connected);
-      setLedgerConnection(connected);
-      setConnectedLedgerSnapshot(snapshot);
-      const successMessage =
-        connected.account_binding === "implicit_account"
-          ? `Ledger path ${connected.derivation_path} added for implicit account ${connected.account_id}.`
-          : `Ledger key connected for ${connected.account_id}.`;
-      setHardwareMsg(successMessage);
-      setLedgerNotice(successMessage);
-      if (connected.account_binding === "implicit_account") {
-        await ensureWatchlistAccount(connected.account_id, {
-          source: "hardware_wallet",
-          wallet_type: connected.wallet_type,
-          public_key: connected.public_key,
-          derivation_path: connected.derivation_path,
-        });
-      } else {
-        await ensureWatchlistAccount(connected.account_id, { source: "manual" });
-      }
-      resetSignerUi();
-      setSignerSelection({
-        accountId: connected.account_id,
-        publicKey: connected.public_key,
-        credentialSource: "hardware_wallet",
-      });
-      setShowManageSigner(false);
-      await loadAccounts(connected.account_id);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const friendly = ledgerHardwareErrorMessage(msg);
-      setShowLedgerPanel(true);
-      setHardwareError(friendly);
-      setActionError(friendly);
-    } finally {
-      setLedgerConnecting(false);
-    }
-  }, [
-    canConnectLedger,
-    ensureWatchlistAccount,
-    ledgerTiedToSelectedAccount,
-    ledgerDerivationPath,
-    loadAccounts,
-    activeAccountId,
-    resetSignerUi,
-    setSignerSelection,
-  ]);
-
-  const switchAwayFromHardware = useCallback(() => {
-    if (!selectedEntry) return;
-    const fallback = fallbackLocalSource(selectedEntry);
-    if (fallback) {
-      setCredentialSource(fallback);
-      setHardwareError(null);
-      setActionError(null);
-      setLedgerNotice(null);
-    } else {
-      setHardwareError("No other local source is available for this key.");
-    }
-  }, [selectedEntry]);
-
   function toggleExpand(poolId: string, action: ActionKind) {
     if (!stakingActionReady) {
-      setActionError(
-        selectedKeychainImportRequired
-          ? "Put this key in fingerprint-protected Keychain before staking with Keychain."
-          : "Select a full-access signer key with a usable local source before submitting staking actions.",
-      );
+      setActionError("Select a signer key with full access before submitting staking actions.");
       return;
     }
     if (expanded?.poolId === poolId && expanded.action === action) {
@@ -953,11 +589,7 @@ export default function Staking() {
   async function handleAction() {
     if (!expanded || !selectedKey || !activeAccountId) return;
     if (!stakingActionReady) {
-      setActionError(
-        selectedKeychainImportRequired
-          ? "Put this key in fingerprint-protected Keychain before staking with Keychain."
-          : "Signer key must be full access and have a usable local source.",
-      );
+      setActionError("Select a full-access signer key.");
       return;
     }
     setActionLoading(true);
@@ -982,14 +614,17 @@ export default function Staking() {
       withdraw_all: `Withdraw all from ${expanded.poolId}`,
     };
 
+    const isHardwareKey = Boolean(
+      selectedEntry?.hardware_wallet || selectedLedgerSnapshot,
+    );
     try {
       const { txHash, broadcastResult } = await executeStakingAction({
         action: expanded.action,
         poolId: expanded.poolId,
         signerId: activeAccountId,
         publicKey: selectedKey,
-        credentialSource: effectiveCredentialSource ?? undefined,
         amount: yoctoAmount,
+        credentialSource: isHardwareKey ? "hardware_wallet" : undefined,
         reason: labels[expanded.action],
       });
       const summary = summarizeBroadcastResult(broadcastResult, txHash);
@@ -1014,13 +649,12 @@ export default function Staking() {
           statusLabel: "BROADCAST ERROR",
         });
       }
-      const friendly =
-        effectiveCredentialSource === "hardware_wallet"
-          ? ledgerHardwareErrorMessage(msg)
-          : msg;
+      const friendly = isHardwareKey
+        ? ledgerHardwareErrorMessage(msg)
+        : msg;
       setActionError(friendly);
       if (
-        effectiveCredentialSource === "hardware_wallet" &&
+        isHardwareKey &&
         (msg.startsWith("ERR_HARDWARE_") || msg.startsWith("ERR_UNAVAILABLE"))
       ) {
         setShowLedgerPanel(true);
@@ -1031,97 +665,32 @@ export default function Staking() {
     }
   }
 
-  const cardClass = "rounded-lg border border-gray-200 bg-surface text-sm";
-  const headerClass = "border-b border-gray-100 px-4 py-2";
-  const inputClass = "flex-1 min-w-0 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none";
-  const compactSelectClass = "min-w-[18rem] max-w-full rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none disabled:opacity-50";
-  const btnStake = "rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50";
-  const btnUnstake = "rounded bg-yellow-500 px-3 py-1 text-xs font-medium text-white hover:bg-yellow-600 disabled:opacity-50";
-  const btnWithdraw = "rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50";
+  const cardClass = "rounded-lg border border-gray-200 bg-surface shadow-sm text-sm";
+  const headerClass = "border-b border-gray-100 px-4 py-3";
+  const inputClass = "flex-1 min-w-0 rounded-md border border-gray-300 bg-surface px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none";
+  const btnStake = "rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50";
+  const btnUnstake = "rounded-md bg-yellow-500 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-yellow-600 disabled:opacity-50";
+  const btnWithdraw = "rounded-md bg-green-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50";
   const signerSummaryStatus = resolveSignerSummaryStatus({
     hardwareError,
-    error,
+    error: activeAccountId && (selectedEntry || selectedLedgerSnapshot) && !hasUsableSource
+      ? "Selected key has no usable source. Import or connect a key in Settings."
+      : activeAccountId && selectedPermissionKind !== null && selectedPermissionKind !== "full_access" && selectedPermissionKind !== "unknown"
+        ? "Choose a full-access key for staking actions."
+        : error,
     neutralLabel: "Choose account",
     neutralMessage: activeAccountId
-      ? null
+      ? (!(selectedEntry || selectedLedgerSnapshot)
+          ? `Choose a signer key for ${activeAccountId}.`
+          : null)
       : "Select an account, or add one manually or from Ledger.",
-    selectionRequiredMessage:
-      activeAccountId && !(selectedEntry || selectedLedgerSnapshot)
-        ? `Choose a signer key for ${activeAccountId}.`
-        : null,
-    sourceNeededMessage:
-      activeAccountId && (selectedEntry || selectedLedgerSnapshot) && !effectiveCredentialSource
-        ? "Choose a signer with a local source, or import/connect one in Manage signer."
-        : null,
-    incompatibleLabel: selectedKeychainImportRequired ? "Fingerprint required" : "Limited key",
-    incompatibleMessage:
-      selectedKeychainImportRequired
-        ? "Keychain staking is blocked until this key is in fingerprint-protected Keychain."
-        : activeAccountId &&
-            effectiveCredentialSource &&
-            selectedPermissionKind !== null &&
-            selectedPermissionKind !== "full_access"
-          ? "Choose a full-access key for staking actions."
-          : null,
-    advisoryLabel: selectedWeakSourceLabel,
-    advisoryMessage: selectedWeakSourceWarning,
     readyLabel: "Ready to stake",
-    readyMessage:
-      ledgerNotice ??
-      importMsg ??
-      "Selected account and signer are ready for staking actions.",
+    readyMessage: ledgerNotice ?? "Signer is ready.",
   });
+  const selectedPublicKey =
+    selectedEntry?.public_key ?? selectedLedgerSnapshot?.publicKey ?? selectedKey ?? null;
+
   const signerSummaryItems = [
-    {
-      label: "Account",
-      value: activeAccountId ? (
-        <span className="font-mono">{activeAccountId}</span>
-      ) : (
-        <span className="text-gray-400">No account selected</span>
-      ),
-    },
-    {
-      label: "Key",
-      value: selectedEntry ? (
-        <div className="min-w-0">
-          {selectedEntry.label?.trim() ? (
-            <div
-              className="truncate text-sm font-medium text-gray-900"
-              title={selectedEntry.label ?? undefined}
-            >
-              {selectedEntry.label}
-            </div>
-          ) : null}
-          <div
-            className="truncate font-mono text-sm text-gray-600"
-            title={selectedEntry.public_key}
-          >
-            {shortPublicKey(selectedEntry.public_key)}
-          </div>
-        </div>
-      ) : selectedLedgerSnapshot ? (
-        <div className="min-w-0">
-          {selectedLedgerSnapshot.label?.trim() ? (
-            <div
-              className="truncate text-sm font-medium text-gray-900"
-              title={selectedLedgerSnapshot.label ?? undefined}
-            >
-              {selectedLedgerSnapshot.label}
-            </div>
-          ) : null}
-          <div
-            className="truncate font-mono text-sm text-gray-600"
-            title={selectedLedgerSnapshot.publicKey}
-          >
-            {shortPublicKey(selectedLedgerSnapshot.publicKey)}
-          </div>
-        </div>
-      ) : selectedKey ? (
-        <span className="font-mono">{shortPublicKey(selectedKey)}</span>
-      ) : (
-        <span className="text-gray-400">Choose a signer key</span>
-      ),
-    },
     {
       label: "Permission",
       value: selectedEntry ? (
@@ -1133,10 +702,6 @@ export default function Staking() {
       ),
     },
     {
-      label: "Source",
-      value: selectedSourceLabel,
-    },
-    {
       label: "Ledger path",
       value: selectedLedgerPath ? (
         <span className="font-mono">{selectedLedgerPath}</span>
@@ -1145,338 +710,14 @@ export default function Staking() {
       ),
     },
   ];
-  const accountKeyTab = (
-    <div className="space-y-4 px-4 py-4">
-        <div>
-          <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
-            Account & key
-          </div>
-          <div className="mt-1 text-sm text-gray-500">
-            Choose the account and key that drive both staking data and transaction signing.
-          </div>
-        </div>
-
-      {signerAccountOptions.length > 0 ? (
-        <label className="block text-sm text-gray-700">
-          <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-            Account
-          </span>
-          <select
-            value={activeAccountId}
-            onChange={(e) => void handleActiveAccountChange(e.target.value)}
-            className={`${compactSelectClass} w-full min-w-0`}
-          >
-            {signerAccountOptions.map((entry) => (
-              <option key={entry.account_id} value={entry.account_id}>
-                {entry.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-
-	      {allSignableKeyOptions.length > 0 ? (
-	        <label className="block text-sm text-gray-700">
-	          <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-	            Key
-	          </span>
-	          <select
-	              value={selectedEntry ? signingKeyId(selectedEntry) : ""}
-	              onChange={(e) => {
-	                const next = allSignableKeys.find(
-	                  (key) => signingKeyId(key) === e.target.value,
-	                );
-	                if (next) {
-	                  handleSelectKey(next);
-	                }
-	              }}
-	              className={`${compactSelectClass} w-full min-w-0`}
-	            >
-	            {allSignableKeyOptions.map((option) => (
-	              <option key={option.id} value={option.id}>
-	                {option.label}
-	              </option>
-	            ))}
-	          </select>
-	        </label>
-	      ) : null}
-
-      <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-        <input
-          type="checkbox"
-          checked={showAllKeys}
-          onChange={(e) => setShowAllKeys(e.target.checked)}
-          className="rounded border-gray-300"
-        />
-        Show all keys
-      </label>
-
-      {selectedEntry && selectedEntry.available_sources.length > 1 ? (
-        <div className="border-t border-gray-100 pt-4">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
-            Signing source
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {selectedEntry.available_sources.map((source) => {
-              const active = effectiveCredentialSource === source;
-              return (
-                <button
-                  type="button"
-                  key={source}
-                  onClick={() => setCredentialSource(source)}
-                  className={`rounded px-2 py-1 text-xs ${
-                    active
-                      ? "bg-blue-600 text-white"
-                      : "bg-blue-50 text-blue-700 hover:bg-blue-100"
-                  }`}
-                >
-                  {signerSourceLabel(source, selectedEntry, signingCapabilities)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
-
-      {selectedEntry ? (
-        <div className="border-t border-gray-100 pt-4">
-          <SigningKeyLabelEditor
-            entry={selectedEntry}
-            network={networkId}
-            disabled={accountsLoading || importing || ledgerConnecting}
-            onSaved={() => loadAccounts(activeAccountId || undefined)}
-          />
-        </div>
-      ) : null}
-
-      {selectedEntry?.permission.kind === "function_call" && showAllKeys ? (
-        <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-          Selected key is function-call scoped. Some staking actions may be rejected by on-chain
-          access-key permission rules.
-        </div>
-      ) : null}
-
-      <div className="rounded-lg border border-gray-200 bg-surface/60">
-        <div className="border-b border-gray-100 px-4 py-2 text-xs font-medium uppercase tracking-wide text-gray-500">
-          Available keys
-        </div>
-        {accountsLoading ? (
-          <div className="px-4 py-3 text-gray-500">Loading accounts&hellip;</div>
-        ) : keys.length === 0 ? (
-          <div className="px-4 py-6 text-center">
-            {activeAccountId ? (
-              <p className="mb-3 text-gray-600">
-                No signing keys found for <strong>{activeAccountId}</strong>.
-              </p>
-            ) : (
-              <p className="mb-3 text-gray-600">Select an account to load signer keys.</p>
-            )}
-            <div className="flex justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => setActiveSignerTab("import")}
-                className="rounded border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
-              >
-                Open import
-              </button>
-              {canConnectLedger ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveSignerTab("ledger");
-                    setShowLedgerPanel(true);
-                  }}
-                  className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
-                >
-                  Open Ledger
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : visibleKeys.length === 0 ? (
-          <div className="px-4 py-6 text-center">
-            <p className="mb-2 text-sm text-amber-700">
-              Only function-call or unknown-permission keys were found.
-            </p>
-            <button
-              type="button"
-              onClick={() => setShowAllKeys(true)}
-              className="rounded border border-amber-300 px-3 py-1 text-xs font-medium text-amber-700 hover:bg-amber-50"
-            >
-              Show all keys
-            </button>
-          </div>
-        ) : (
-          <AccountPicker
-            keys={visibleKeys}
-            selectedAccountId={activeAccountId}
-            selectedPublicKey={selectedKey}
-            onSelect={handleSelectKey}
-            onImport={handleImport}
-            importing={importing}
-            importingKeyId={importingKeyId}
-            signingCapabilities={signingCapabilities}
-            isStarred={isStarred}
-            onToggleStar={toggleStar}
-          />
-        )}
-      </div>
-    </div>
-  );
-
-  const importTab = (
-    <div className="space-y-4 px-4 py-4">
-      <div>
-        <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
-          Import software keys
-        </div>
-        <div className="mt-1 text-sm text-gray-500">
-          Import software keys for the selected account into {storageLabel.toLowerCase()}.
-        </div>
-      </div>
-
-      <div className="flex flex-wrap gap-3 text-sm">
-        <label
-          className={`inline-flex items-center gap-1.5 ${canImportLegacy ? "text-gray-700" : "text-gray-400"}`}
-        >
-          <input
-            type="checkbox"
-            checked={importSources.includes("legacy_file")}
-            onChange={(e) =>
-              setImportSources((prev) =>
-                e.target.checked
-                  ? prev.includes("legacy_file")
-                    ? prev
-                    : [...prev, "legacy_file"]
-                  : prev.filter((s): s is CredentialSource => s !== "legacy_file"),
-              )
-            }
-            disabled={!canImportLegacy}
-            className="rounded border-gray-300"
-          />
-          {credentialSourceLabel("legacy_file", signingCapabilities)}
-        </label>
-        <label
-          className={`inline-flex items-center gap-1.5 ${canImportNearCli ? "text-gray-700" : "text-gray-400"}`}
-        >
-          <input
-            type="checkbox"
-            checked={importSources.includes("near_cli_secure")}
-            onChange={(e) =>
-              setImportSources((prev) =>
-                e.target.checked
-                  ? prev.includes("near_cli_secure")
-                    ? prev
-                    : [...prev, "near_cli_secure"]
-                  : prev.filter((s): s is CredentialSource => s !== "near_cli_secure"),
-              )
-            }
-            disabled={!canImportNearCli}
-            className="rounded border-gray-300"
-          />
-          {credentialSourceLabel("near_cli_secure", signingCapabilities)}
-        </label>
-      </div>
-
-      {secureStoreName ? (
-        <div className="text-sm text-gray-500">
-          {storageLabel}: {secureStoreName}
-        </div>
-      ) : null}
-
-      <div className="flex flex-wrap gap-2">
-        {hasImportableKeys ? (
-          <button
-            onClick={() => handleImport()}
-            disabled={importing || importSources.length === 0 || !canPersistSecureStore}
-            className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            <Download size={14} />
-            {importing && !importingKeyId ? "Importing…" : "Import all"}
-          </button>
-        ) : null}
-        {selectedEntry ? (
-          <button
-            onClick={() =>
-              handleImport(selectedEntry, Boolean(selectedEntry.nearxd_keychain_import_required))
-            }
-            disabled={importing || importSources.length === 0 || !canPersistSecureStore}
-            className="inline-flex items-center gap-1 rounded border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-          >
-            {importing && importingKeyId === `${selectedEntry.account_id}:${selectedEntry.public_key}`
-              ? "Importing…"
-              : "Import selected key"}
-          </button>
-        ) : null}
-      </div>
-
-      {importMsg ? (
-        <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-          <KeyRound size={12} className="mr-1 inline" />
-          {importMsg}
-        </div>
-      ) : null}
-    </div>
-  );
-
-  const ledgerTab = (
-    <div className="space-y-4 px-4 py-4">
-      {isTauriRuntime() ? (
-        <LedgerConnectionPanel
-          open={showLedgerPanel}
-          onToggleOpen={() => setShowLedgerPanel((prev) => !prev)}
-          canConnect={canConnectLedger}
-          connecting={ledgerConnecting}
-          onConnect={() => void handleConnectLedger()}
-          connectLabel={ledgerTiedToSelectedAccount ? "Connect Ledger" : "Connect & Add HD Path"}
-          derivationPath={ledgerDerivationPath}
-          onDerivationPathChange={setLedgerDerivationPath}
-          tiedToSelectedAccount={ledgerTiedToSelectedAccount}
-          onTiedToSelectedAccountChange={(value) => {
-            setLedgerTiedToSelectedAccount(value);
-            setHardwareMsg(null);
-            setHardwareError(null);
-            setActionError(null);
-          }}
-          selectedAccountLabel={activeAccountId || null}
-          selectedAccountKind="selected account"
-          implicitAccountId={ledgerConnection?.implicit_account_id ?? null}
-          publicKey={ledgerConnection?.public_key ?? null}
-          accountBinding={ledgerConnection?.account_binding ?? null}
-          message={hardwareMsg}
-          error={hardwareError}
-          errorActions={
-            effectiveCredentialSource === "hardware_wallet" ? (
-              <div className="inline-flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleConnectLedger()}
-                  className="rounded border border-amber-300 px-2 py-0.5 text-[11px] text-amber-700 hover:bg-amber-100"
-                >
-                  Reconnect Ledger
-                </button>
-                <button
-                  type="button"
-                  onClick={switchAwayFromHardware}
-                  className="rounded border border-amber-300 px-2 py-0.5 text-[11px] text-amber-700 hover:bg-amber-100"
-                >
-                  Switch source
-                </button>
-              </div>
-            ) : null
-          }
-        />
-      ) : null}
-    </div>
-  );
 
   return (
     <div>
-      <h1 className="mb-4 text-xl font-bold">Staking</h1>
+      <h1 className="mb-4 text-2xl font-bold tracking-tight text-gray-900">Staking</h1>
 
       <div className={`${cardClass} mb-4`}>
-        <div className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
-          <h2 className="text-xs font-medium uppercase text-gray-500">Monitored Accounts</h2>
+        <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">Monitored Accounts</h2>
           {watchlistLoading && <span className="text-xs text-gray-400">Loading…</span>}
         </div>
         <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-2">
@@ -1496,7 +737,7 @@ export default function Staking() {
             type="button"
             onClick={() => void handleAddWatchlistAccount()}
             disabled={!isTauriRuntime() || !watchlistInput.trim()}
-            className="shrink-0 rounded bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            className="shrink-0 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none disabled:opacity-50"
             title="Add monitored account"
           >
             <Plus size={12} className="mr-1 inline" />
@@ -1507,7 +748,7 @@ export default function Staking() {
               type="button"
               onClick={openLedgerHdPathPanel}
               disabled={!canConnectLedger}
-              className="shrink-0 rounded border border-blue-200 px-2.5 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+              className="shrink-0 rounded-md border border-blue-200 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-50 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
               title="Connect Ledger and add an implicit-account HD path"
             >
               <Usb size={12} className="mr-1 inline" />
@@ -1515,7 +756,7 @@ export default function Staking() {
             </button>
           )}
         </div>
-        <div className="max-h-40 overflow-y-auto">
+        <div className="max-h-56 overflow-y-auto">
           {watchlist.length === 0 && !activeAccountId ? (
             <div className="px-4 py-3 text-xs text-gray-500">
               Add an account to monitor staking positions.
@@ -1523,44 +764,54 @@ export default function Staking() {
           ) : (
             <>
               {activeAccountId && !watchlist.some((e) => e.account_id === activeAccountId) && (
-                <div className="border-b border-gray-100 px-4 py-2">
-                  <button
-                    type="button"
-                    className="font-mono text-xs text-blue-700"
-                    onClick={() => void handleActiveAccountChange(activeAccountId)}
-                  >
-                    {activeAccountId}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  className="flex w-full cursor-pointer items-center gap-2 border-b border-gray-100 border-l-2 border-l-blue-600 px-4 py-2 text-left"
+                  onClick={() => void handleActiveAccountChange(activeAccountId)}
+                >
+                  <Check size={12} className="shrink-0 text-blue-600" />
+                  <span className="min-w-0 flex-1 font-mono text-xs text-blue-600">{activeAccountId}</span>
+                </button>
               )}
               {watchlist.map((entry) => {
                 const selected = entry.account_id === activeAccountId;
                 return (
                   <div
                     key={`${entry.network}:${entry.account_id}`}
-                    className={`flex items-center justify-between border-b border-gray-100 px-4 py-2 last:border-b-0 ${
-                      selected ? "bg-blue-600/10" : ""
+                    className={`flex items-center border-b border-gray-100 transition-colors last:border-b-0 ${
+                      selected
+                        ? "border-l-2 border-l-blue-600 bg-blue-50/60"
+                        : "border-l-2 border-l-transparent hover:bg-gray-50"
                     }`}
                   >
                     <button
                       type="button"
-                      className={`min-w-0 flex-1 text-left ${selected ? "text-blue-800" : "text-gray-700"}`}
+                      className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-4 py-2 text-left"
                       onClick={() => {
                         void handleActiveAccountChange(entry.account_id);
                       }}
                     >
-                      <div className="font-mono text-xs">{entry.account_id}</div>
-                      {stakingWatchlistMeta(entry) && (
-                        <div className="mt-0.5 truncate text-[11px] text-gray-400">
-                          {stakingWatchlistMeta(entry)}
-                        </div>
+                      {selected ? (
+                        <Check size={12} className="shrink-0 text-blue-600" />
+                      ) : (
+                        <span className="size-3 shrink-0" />
                       )}
+                      <span className="min-w-0 flex-1">
+                        <span className={`block font-mono text-xs ${selected ? "text-blue-600" : "text-gray-700"}`}>
+                          {entry.account_id}
+                        </span>
+                        {stakingWatchlistMeta(entry) && (
+                          <span className="mt-0.5 block break-all text-[11px] text-gray-400">
+                            {stakingWatchlistMeta(entry)}
+                          </span>
+                        )}
+                      </span>
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleRemoveWatchlistAccount(entry.account_id)}
                       disabled={!isTauriRuntime()}
-                      className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
+                      className="mr-2 rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
                       title="Remove from watchlist"
                     >
                       <Trash2 size={12} />
@@ -1571,6 +822,26 @@ export default function Staking() {
             </>
           )}
         </div>
+        {showLedgerPanel && isTauriRuntime() && (
+          <LedgerConnectionPanel
+            open={showLedgerPanel}
+            onToggleOpen={() => setShowLedgerPanel((v) => !v)}
+            canConnect={canConnectLedger}
+            connecting={ledgerConnecting}
+            onConnect={() => void handleConnectLedger()}
+            derivationPath={ledgerDerivationPath}
+            onDerivationPathChange={setLedgerDerivationPath}
+            tiedToSelectedAccount={ledgerTiedToSelectedAccount}
+            onTiedToSelectedAccountChange={setLedgerTiedToSelectedAccount}
+            selectedAccountLabel={activeAccountId}
+            selectedAccountKind="staking account"
+            implicitAccountId={ledgerConnection?.implicit_account_id}
+            publicKey={ledgerConnection?.public_key}
+            accountBinding={ledgerConnection?.account_binding}
+            message={hardwareMsg}
+            error={hardwareError}
+          />
+        )}
       </div>
 
       <SignerSummaryCard
@@ -1588,11 +859,19 @@ export default function Staking() {
                 label: entry.label,
               })),
               onChange: (value) => {
-                setShowManageSigner(false);
                 void handleActiveAccountChange(value);
               },
               disabled: accountsLoading || signerAccountOptions.length === 0,
               placeholder: "No accounts",
+              starredValues: new Set(starredAccounts),
+              onToggleStar: toggleStar,
+              meta: activeAccountId ? (
+                <CopyableValue text={activeAccountId}>
+                  <Link to={`/account/${activeAccountId}`} className="text-blue-600 hover:underline">
+                    View in Explorer
+                  </Link>
+                </CopyableValue>
+              ) : undefined,
             }}
             keyOption={{
               label: "Key",
@@ -1609,46 +888,22 @@ export default function Staking() {
               },
               disabled: accountsLoading || allSignableKeyOptions.length === 0,
               placeholder: "No keys",
-            }}
-            source={{
-              label: "Source",
-              value: effectiveCredentialSource ?? "",
-              options: signerSourceOptions,
-              onChange: (value) => setCredentialSource(value as CredentialSource),
-              disabled: signerSourceOptions.length <= 1,
-              placeholder: "Not selected",
-              action: isUpgradeEligible(selectedEntry, effectiveCredentialSource, canPersistSecureStore)
-                ? {
-                    label: upgradeButtonLabel(
-                      signingCapabilities,
-                      sourceUpgradeKind ?? "import",
-                      Boolean(selectedEntry?.nearxd_keychain_import_required),
-                    ),
-                    onClick: () => void handleUpgradeToKeychain(),
-                    disabled: importing,
-                    loading: importing && importingKeyId === selectedKeyId,
-                    loadingLabel: upgradeLoadingLabel(
-                      sourceUpgradeKind ?? "import",
-                      Boolean(selectedEntry?.nearxd_keychain_import_required),
-                    ),
-                  }
-                : undefined,
+              meta: selectedPublicKey ? (
+                <CopyableValue text={selectedPublicKey}>
+                  <span className="break-all font-mono text-gray-500">{selectedPublicKey}</span>
+                </CopyableValue>
+              ) : undefined,
             }}
           />
         }
         items={signerSummaryItems}
         actions={
-          <button
-            type="button"
-            onClick={() => {
-              setActiveSignerTab("account_key");
-              setShowManageSigner(true);
-            }}
-            className="inline-flex items-center gap-2 rounded border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          <Link
+            to="/settings"
+            className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
           >
-            <Settings2 className="size-4" />
-            Manage signer
-          </button>
+            Manage keys in Settings &rarr;
+          </Link>
         }
       />
 
@@ -1669,26 +924,8 @@ export default function Staking() {
         </div>
       ) : null}
 
-      <ManageSignerPanel
-        open={showManageSigner}
-        onClose={() => setShowManageSigner(false)}
-        activeTab={activeSignerTab}
-        onTabChange={(tab) => {
-          setActiveSignerTab(tab);
-          if (tab === "ledger") {
-            setShowLedgerPanel(true);
-            setHardwareMsg(null);
-            setHardwareError(null);
-          }
-        }}
-      >
-        {activeSignerTab === "account_key" ? accountKeyTab : null}
-        {activeSignerTab === "import" ? importTab : null}
-        {activeSignerTab === "ledger" ? ledgerTab : null}
-      </ManageSignerPanel>
-
       {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-surface px-4 py-3 text-sm text-red-600">
+        <div className="mb-4 rounded-lg border border-red-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
           {error}
         </div>
       )}
@@ -1707,17 +944,17 @@ export default function Staking() {
       {highlightedPools.length > 0 && (
         <div className={`${cardClass} mb-4`}>
           <div className={headerClass}>
-            <h2 className="text-xs font-medium uppercase text-gray-500">Your Staked Validators</h2>
+            <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">Your Staked Validators</h2>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
-                  <th className="px-4 py-2 font-medium">Validator</th>
-                  <th className="px-4 py-2 font-medium text-right">Staked</th>
-                  <th className="px-4 py-2 font-medium text-right">Unstaked</th>
-                  <th className="px-4 py-2 font-medium text-center">Withdraw</th>
-                  <th className="px-4 py-2 font-medium text-right">Actions</th>
+                  <th className="px-4 py-2.5 font-medium">Validator</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Staked</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Unstaked</th>
+                  <th className="px-4 py-2.5 font-medium text-center">Withdraw</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1758,7 +995,7 @@ export default function Staking() {
       {/* Other Validators */}
       <div className={cardClass}>
         <div className={headerClass}>
-          <h2 className="text-xs font-medium uppercase text-gray-500">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">
             Active Validators
             {validatorsLoading && " (loading\u2026)"}
             {!validatorsLoading && ` (${otherValidators.length})`}
@@ -1769,10 +1006,10 @@ export default function Staking() {
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-surface">
                 <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
-                  <th className="px-4 py-2 font-medium">Validator</th>
-                  <th className="px-4 py-2 font-medium text-right">Total Stake</th>
-                  <th className="px-4 py-2 font-medium text-right">Uptime</th>
-                  <th className="px-4 py-2 font-medium text-right">Action</th>
+                  <th className="px-4 py-2.5 font-medium">Validator</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Total Stake</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Uptime</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1807,7 +1044,19 @@ export default function Staking() {
         ) : (
           !validatorsLoading && (
             <div className="px-4 py-4 text-center text-sm text-gray-500">
-              No validators loaded.
+              {validatorsError ? (
+                <div className="space-y-2">
+                  <div className="text-red-500">Failed to load validators: {validatorsError}</div>
+                  <button
+                    className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                    onClick={() => setValidatorsRetry((n) => n + 1)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : (
+                "No validators loaded."
+              )}
             </div>
           )
         )}
@@ -1920,7 +1169,7 @@ function HighlightedRow({
               onAmountChange={onAmountChange}
               onConfirm={onConfirm}
               onCancel={() => onToggle(pool.poolId, activeAction!)}
-              btnConfirm={activeAction === "unstake" || activeAction === "unstake_all" ? btnUnstake : activeAction === "withdraw" || activeAction === "withdraw_all" ? btnWithdraw : btnStake}
+              btnConfirm={btnStake}
               inputClass={inputClass}
             />
           </td>
@@ -2063,7 +1312,7 @@ function ActionPanel({
               type="button"
               onClick={() => onAmountChange(maxNear)}
               disabled={loading}
-              className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 focus:ring-2 focus:ring-blue-500/20 focus:outline-none disabled:opacity-50"
             >
               Max
             </button>
@@ -2085,9 +1334,9 @@ function ActionPanel({
       </div>
       {result && (
         <div
-          className={`text-xs ${result.success === false ? "text-rose-600" : "text-green-600"}`}
+          className={`text-xs ${result.success === false ? "text-rose-600" : result.success === true ? "text-green-600" : "text-yellow-600"}`}
         >
-          {result.success === false ? "Broadcast failed" : "Success!"} TX:{" "}
+          {result.success === false ? "Broadcast failed" : result.success === true ? "Success!" : "Submitted"} TX:{" "}
           <Link
             to={`/tx/${result.txHash}`}
             className="break-all text-blue-600 hover:underline font-mono"
