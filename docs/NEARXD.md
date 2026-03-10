@@ -47,10 +47,12 @@ FastNEAR token:
 - `set_fastnear_auth_token` (`set_fastnear_api_key` alias)
 - `clear_fastnear_auth_token` (`clear_fastnear_api_key` alias)
 
-User-presence and signing settings:
+User-presence, preferences, and signing settings:
 
 - `probe_user_presence`
 - `request_user_presence`
+- `get_preferences`
+- `set_preferences`
 - `get_signing_settings`
 - `set_signing_settings`
 
@@ -105,13 +107,12 @@ Token backend selection:
 File paths:
 
 - token file: `$NEARXD_TOKEN_FILE` or `~/.nearx/fastnear_auth_token` (filename retained for compatibility)
-- signing settings fallback file: `~/.nearx/signing_settings.json`
+- signing settings file: `~/.nearx/signing_settings.json` (file-only, no keychain/OS-secret-store involvement)
 
 Keychain services (macOS):
 
 - `nearxd.fastnear.auth` (account: `fastnear_auth_token`)
 - `nearxd.near.credentials` (account namespace: `<network>:<account_id>:<public_key>`, with backward read support for `<network>:<account_id>`)
-- `nearxd.signing.settings` (account: `default`)
 
 For NEAR signer credentials on macOS, NEARx now tracks whether a nearxd Keychain item is verified biometric (`biometry_current_set`) versus legacy/unknown. Importing into Keychain is additive only and does not remove the original file-system or near-cli secure source.
 
@@ -184,15 +185,14 @@ Output:
   "settings": {
     "default_network": "testnet",
     "require_user_presence": true
-  },
-  "prefer_keychain": true
+  }
 }
 ```
 
 `set_signing_settings` output:
 
 ```json
-{"stored": true, "source": "keychain"}
+{"stored": true, "source": "file"}
 ```
 
 `get_signing_settings` output:
@@ -206,6 +206,49 @@ Output:
   "source": "keychain"
 }
 ```
+
+### `get_preferences` / `set_preferences`
+
+User preferences stored as a section within signing settings (file-only at `~/.nearx/signing_settings.json`).
+
+`get_preferences` input:
+
+```json
+{}
+```
+
+`get_preferences` output:
+
+```json
+{
+  "preferences": {
+    "always_prompt_user_presence": false
+  },
+  "source": "keychain"
+}
+```
+
+`set_preferences` input:
+
+```json
+{
+  "always_prompt_user_presence": true
+}
+```
+
+`set_preferences` output:
+
+```json
+{
+  "stored": true,
+  "source": "keychain",
+  "preferences": {
+    "always_prompt_user_presence": true
+  }
+}
+```
+
+When `always_prompt_user_presence` is enabled, `sign_transaction` enforces a broker-side biometric prompt for all software credential sources (`legacy_file`, `near_cli_secure`, `nearxd_keychain`). Hardware wallets are excluded because Ledger has its own physical confirmation. For `nearxd_keychain` on macOS, this means the user may see two biometric prompts — one from the keychain access and one from the explicit signing gate. Rejection returns `ERR_AUTH`.
 
 Additional signing-settings sections used by staking/hardware flows:
 
@@ -251,6 +294,7 @@ Output rows include:
 - `nearxd_keychain_protection` (`biometry_current_set`, `user_presence`, `unprotected`, `unknown`, or `null`)
 - `nearxd_keychain_import_required`
 - `importable`
+- `security_level` (`secure`, `hardware`, `basic`)
 - `last_seen_at_ms`
 - `stale`
 
@@ -525,7 +569,9 @@ Source resolution defaults to:
 
 When `credential_source=hardware_wallet`, `signer_public_key` is required and nearxd signs with the indexed hardware wallet record only (no automatic source fallback).
 
-On macOS, when `credential_source=nearxd_keychain` is sent explicitly, nearxd rejects the request with `ERR_IMPORT_REQUIRED` unless that key's indexed `nearxd_keychain_protection` is `biometry_current_set`.
+On macOS, when `credential_source=nearxd_keychain` is sent explicitly but the keychain copy is not biometric-protected, nearxd silently falls back to the next available software source (near_cli_secure or legacy_file) instead of rejecting the request.
+
+When signing from `legacy_file` or `near_cli_secure`, nearxd performs a best-effort auto-import into the secure store as a side-effect, so that future sign operations can use the biometric-protected copy. Auto-import failures are logged but never block the signing operation.
 
 Response includes `credential_source` with the source actually used.
 
@@ -543,10 +589,24 @@ Request params:
 | `network` | string | no | `"mainnet"` or `"testnet"` (default: `"mainnet"`) |
 | `reason` | string | no | Optional signing context/prompt reason (used by interactive credential sources when applicable) |
 
-Action types:
+Action types (7 supported):
+
+Actions that allow a different receiver (`receiver_id` is independent of `signer_id`):
 
 - `{"type": "Transfer", "deposit": "<yoctoNEAR>"}` — native NEAR transfer
 - `{"type": "FunctionCall", "method_name": "...", "args": "<base64>", "gas": <u64>, "deposit": "<yoctoNEAR>"}` — contract call (gas defaults to 30 TGas, deposit defaults to "0")
+- `{"type": "CreateAccount"}` — create a sub-account (receiver is the new account ID)
+
+Self-targeting actions (`receiver_id` **must** equal `signer_id` — the NEAR protocol rejects transactions where they differ):
+
+- `{"type": "DeployContract", "code": "<base64>"}` — deploy WASM contract to signer's account
+- `{"type": "Stake", "stake": "<yoctoNEAR>", "public_key": "<ed25519:...>"}` — stake with a validator
+- `{"type": "AddKey", "public_key": "<ed25519:...>", "permission": "FullAccess"}` — add a full-access key
+- `{"type": "AddKey", "public_key": "<ed25519:...>", "permission": {"type": "FunctionCall", "allowance": "<yoctoNEAR>"|null, "receiver_id": "<accountId>", "method_names": ["m1"]}}` — add a function-call key
+- `{"type": "DeleteKey", "public_key": "<ed25519:...>"}` — remove an access key
+- `{"type": "DeleteAccount", "beneficiary_id": "<accountId>"}` — delete account, remaining balance to beneficiary
+
+The broker validates the sender==receiver constraint before signing and returns `ERR_PARAMS` if violated.
 
 Response:
 

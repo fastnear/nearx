@@ -1,6 +1,6 @@
 # NEARx Engineering Continuity
 
-Status date: 2026-03-08
+Status date: 2026-03-09
 
 This file is a technical continuity reference for maintainers and collaborators. It captures current architecture, runtime contracts, and integration boundaries across all targets.
 
@@ -33,12 +33,22 @@ Key directories:
 - `src/bin/nearx.rs` - native TUI entrypoint
 - `src/bin/nearxd/` - local broker daemon (modular: main, broker, socket, token, keychain, credentials, settings, signing, hardware_wallet, user_presence, rpc, config, util, tests)
 - `src/bin/nearx-proxy.rs` - backend HTTP proxy server for web frontend
+- `nearx-broker-ipc/` - shared workspace crate: cross-platform `BrokerEndpoint` abstraction over `interprocess` local sockets (used by Tauri, native-host, and nearxd)
+- `nearx-plugin-core/` - plugin infrastructure crate (excluded from workspace; types, IPC, registry, traits)
 - `native-host/` - browser native messaging host (stdio length-prefixed JSON)
 - `extension/` - browser extension (MV3)
 - `tauri-workspace/src-tauri/` - desktop shell and IPC commands
 - `web/` - React/TypeScript frontend (synced from `fastnear/explorer-frontend`)
 - `e2e-tests/` - Playwright + Selenium E2E suite
-- `tools/build-macos-qa.sh` - local macOS signed QA build (prefers `Developer ID Application`, falls back to `Apple Development`, verifies app + sidecar are non-adhoc)
+- `tools/` - build and release scripts (see section 13)
+
+Key config files:
+
+- `rust-toolchain.toml` - Rust 1.89.0, rustfmt + clippy
+- `.cargo/config.toml` - WASM target hardening
+- `Makefile` - top-level build automation (`make help` for targets)
+- `.github/workflows/` - CI: `ci.yml`, `e2e.yml`, `goe-ablation.yml`
+- `web/.explorer-upstream.json` - upstream sync config (see section 10)
 
 ## 3. Build Targets And Shared Core
 
@@ -180,6 +190,9 @@ Implemented methods:
 - `approve_sign_intent`
 - `consume_sign_intent`
 - `sign_transaction`
+- `set_signing_key_label`
+- `get_preferences`
+- `set_preferences`
 
 ### 6.2 Token Resolution And Persistence
 
@@ -222,14 +235,13 @@ macOS keychain identity:
 Additional secure-store services:
 
 - `nearxd.near.credentials` (scoped account namespace: `<network>:<account_id>:<public_key>`, with legacy fallback `<network>:<account_id>`)
-- `nearxd.signing.settings` (account: `default`)
 - near-cli secure credentials: service `near-<network>-<account_id>`, account `<account_id>:<public_key>`
 
 macOS signer protection semantics:
 
 - nearxd tracks indexed `nearxd_keychain_protection` metadata per signing key
 - `biometry_current_set` is the only macOS Keychain state NEARx treats as fingerprint-ready for signing
-- legacy or fallback Keychain items surface as `unknown`, `unprotected`, or `user_presence` and require explicit import/repair before `credential_source=nearxd_keychain` is allowed
+- Keychain import is opt-in only. Signing works from original sources (`legacy_file`, `near_cli_secure`) without requiring import. The frontend does not prompt or warn about keychain import
 - Keychain import is additive only; original `legacy_file` and `near_cli_secure` sources remain available
 - ad-hoc debug Tauri builds may fall back to weaker local sources because protected Keychain writes are not reliable without a properly signed app bundle and signed `nearxd` sidecar
 - local biometric QA can use an `Apple Development`-signed bundle; release/distribution still requires `Developer ID Application` and notarization
@@ -278,15 +290,20 @@ User-presence behavior:
 - `require_user_presence` is only enforced when the active adapter reports support
 - in practice this is macOS `LocalAuthentication` or the mock adapter used in tests
 - Linux/Windows imports and reads rely on OS secure-store protections without a separate biometric prompt
-- macOS imports now report actual Keychain protection outcomes and may surface `nearxd_keychain_import_required=true` when the resulting Keychain copy is not verified biometric
+- macOS imports report actual Keychain protection outcomes (`nearxd_keychain_protection` field)
 
 Signer discovery / enforcement:
 
-- `list_near_signing_keys` rows now include `nearxd_keychain_protection` and `nearxd_keychain_import_required`
+- `list_near_signing_keys` rows include `nearxd_keychain_protection`
 - `reprotect_near_signing_key` repairs an existing nearxd Keychain item in place
-- `sign_transaction` rejects explicit `credential_source=nearxd_keychain` with `ERR_IMPORT_REQUIRED` unless indexed protection is `biometry_current_set`
+- `sign_transaction` silently falls back to the next software source when `credential_source=nearxd_keychain` is requested but the keychain copy is not biometric-protected
+- `list_near_signing_keys` rows include `security_level` (`secure`, `hardware`, `basic`) for simplified frontend display
 
-`get_signing_settings` / `set_signing_settings` manage signing-related settings, with secure-store-preferred persistence and file fallback (`~/.nearx/signing_settings.json`). Returned source strings may still use the historical label `keychain` for compatibility.
+`get_signing_settings` / `set_signing_settings` manage signing-related settings, persisted to `~/.nearx/signing_settings.json`. Settings are non-secret metadata (key labels, preferences, staking watchlist, hardware wallet index). The file backend uses atomic write (temp + rename) with `0o600` permissions on Unix. Settings are file-only — no keychain/OS-secret-store involvement. The wire parameter `prefer_keychain` is accepted but ignored.
+
+**Ledger transaction format:** Hardware wallet signing serializes `TransactionV0` directly (without the `Transaction` enum discriminant prefix) because the NEAR Ledger app expects raw V0 borsh bytes. The `Transaction::V0(...)` wrapper is used only for hash computation and `SignedTransaction` construction.
+
+All settings read-modify-write operations are serialized via `BrokerState::settings_lock` (`Mutex<()>`) to prevent concurrent clobbering.
 
 `get_signing_capabilities` returns:
 
@@ -299,6 +316,12 @@ Signer discovery / enforcement:
 - `supports_user_presence`
 - `supports_hardware_wallet_connect`
 - `supports_hardware_wallet_sign`
+
+### 6.5 Sign Transaction Validation
+
+`sign_transaction` enforces the NEAR protocol's sender==receiver constraint before signing. Actions classified as self-targeting (DeployContract, Stake, AddKey, DeleteKey, DeleteAccount) are rejected with `ERR_PARAMS` if `receiver_id` differs from `signer_id`. This is defense-in-depth: the frontend hides the Receiver field for these action types, but the broker validates regardless of caller.
+
+This classification comes from nearcore's `check_actor_permissions` (`runtime/runtime/src/actions.rs`). Actions that allow a different receiver: Transfer, FunctionCall, CreateAccount.
 
 Credential secure-store account namespace:
 
@@ -375,7 +398,12 @@ Broker-backed commands forward to `nearxd` via the local-socket transport:
 - `reprotect_near_signing_key`
 - `list_near_credentials`
 - `import_near_credentials`
+- `get_preferences`
+- `set_preferences`
 - `sign_transaction`
+- `set_signing_key_label`
+- `fetch_fastnear_json`
+- `pick_wasm_file` (native file dialog for WASM contract selection, used by DeployContract)
 - E2E-only commands from `test_api.rs` (feature `e2e`)
 
 ### 8.3 Deep-Link Pipeline
@@ -408,29 +436,49 @@ Modes:
 
 The frontend communicates with `nearxd` only when running inside Tauri (via Tauri commands that forward to the broker). In standalone mode, it talks directly to NEAR RPC endpoints.
 
-### 9.1 Signer UX Architecture
+`web/CLAUDE.md` documents upstream explorer-frontend architecture (routing, API layer, hooks, widgets, components). This section documents NEARx-specific additions. The `nearx_only` list in `web/.explorer-upstream.json` is the authoritative boundary between upstream-synced and NEARx-only files.
 
-Current signer/account UX for NEARx-only pages is shared rather than page-local.
+### 9.1 Settings Page
+
+File: `web/src/pages/Settings.tsx`
+Route: `/settings` (Tauri-only, not shown in standalone mode)
+
+Consolidates all signer management into one place:
+
+- **Security**: "Always require fingerprint" toggle (`always_prompt_user_presence` preference, enforced broker-side in `sign_transaction`)
+- **Signing Keys**: read-only list of discovered keys grouped by account, with label editing and simplified security badges (Secure/Standard/Hardware via `security_level`). Footer links to Staking/Sign pages for Ledger connection.
+- **Platform Info**: read-only capabilities display (platform, secure store, biometric support, hardware wallet support, transport, network)
+
+Preferences are stored via `get_preferences` / `set_preferences` broker methods, persisted in signing settings (file-only at `~/.nearx/signing_settings.json`).
+
+Hook: `web/src/hooks/usePreferences.ts` — loads preferences on mount, provides `updatePreference(key, value)` with optimistic update and rollback.
+
+### 9.2 Signer UX Architecture
+
+Signer management (labeling, Ledger connection) is centralized in the Settings page. Staking and Sign Transaction pages use simplified signer controls: account dropdown + key dropdown + action buttons. Credential source resolution is handled entirely by the backend — the frontend never tracks or passes `credential_source` for software keys.
 
 - Shared signer selection state: `web/src/hooks/useSignerSelection.ts`
-  - owns selected account, public key, credential source, account/key reloads, and source fallback resolution
+  - owns selected account, public key, account/key reloads
   - uses `list_near_signing_accounts` + `list_near_signing_keys` through Tauri runtime methods
-  - persists the last selected credential source per `(page context, account_id, public_key)` via `web/src/hooks/useAccountPrefs.ts`
-- Shared signer summary/status priority: `web/src/lib/signerSummaryStatus.ts`
+  - persists last selected account and key via `web/src/hooks/useAccountPrefs.ts`
+- Shared signer summary/status: `web/src/lib/signerSummaryStatus.ts`
   - used by both `web/src/pages/Staking.tsx` and `web/src/pages/SignTransaction.tsx`
-  - normal priority order is: hardware error -> blocking error -> neutral/selection-needed -> source-needed -> incompatible -> advisory -> ready
-- Shared Keychain import/repair semantics:
-  - `web/src/lib/sourceUpgrade.ts`
-  - `web/src/lib/signerSourceSelection.ts`
-  - when `nearxd_keychain_import_required=true`, both Staking and Sign Tx block `Keychain` signing and show inline import/repair CTA
-  - if the user explicitly switches to `File system` or `OS secrets`, actions remain allowed but the UI warns that fingerprint verification is not used
-- Shared quick controls and modal shell:
-  - `web/src/components/SignerQuickSelectors.tsx`
+  - 3-state model: hardware error / error -> neutral -> ready
+- Shared quick controls:
+  - `web/src/components/SignerQuickSelectors.tsx` (2-column: account + key)
   - `web/src/components/SignerSummaryCard.tsx`
-  - `web/src/components/ManageSignerPanel.tsx`
-  - `web/src/components/LedgerConnectionPanel.tsx`
+- Key utilities: `web/src/lib/signerSourceSelection.ts` (signingKeyId, keyHasUsableSource, preferSigningKey)
 
-### 9.2 Staking Page Behavior
+NEARx-only shared libraries in `web/src/lib/` (all excluded from upstream sync):
+
+- `signerSourceSelection.ts` - key identification, usable-source detection, key preference
+- `signerSummaryStatus.ts` - 3-state readiness model for signer summary cards
+- `broadcastSummary.ts` - broadcast result classification (success/submitted/failed)
+- `hardwareWalletDisplay.ts` - display formatting for signing accounts, keys, permissions
+- `ledgerConnectionUi.ts` - Ledger connection/error state management, shared by Staking and Sign pages
+- `sourceUpgrade.ts` - credential source upgrade path detection
+
+### 9.3 Staking Page Behavior
 
 File: `web/src/pages/Staking.tsx`
 
@@ -438,23 +486,30 @@ File: `web/src/pages/Staking.tsx`
 - The watchlist is a saved-account convenience list, not a separate source of truth for signer readiness
 - Choosing an account from signer controls auto-seeds the watchlist if needed
 - Staking actions require a full-access key with a usable local source
-- When `Keychain` is the selected source on macOS, staking actions additionally require verified biometric protection (`nearxd_keychain_import_required=false`)
+- Credential source is auto-resolved by the backend; users manage key labels in Settings
 - Action success UI now shows the full transaction hash, not a truncated hash fragment
+- Broadcast uses `broadcast_tx_commit` with client-side timeout, falling back to `broadcast_tx_async` on RPC timeout; UI displays 3 states: success (green), submitted/pending (yellow), failed (red)
 
-### 9.3 Sign Transaction Behavior
+### 9.4 Sign Transaction Behavior
 
 File: `web/src/pages/SignTransaction.tsx`
 
-- Receiver remains independent from signer selection except when it is blank and a signer account is first chosen
+- Supports all 8 core NEAR action types: Transfer, FunctionCall, DeployContract, CreateAccount, DeleteAccount, DeleteKey, AddKey (FullAccess + FunctionCall permission), Stake
+- Action selector is a `<select>` dropdown; each type renders its own form fields
+- Non-FunctionCall actions require a full-access key (enforced client-side in `evaluateKeyCompatibility`)
+- Self-targeting actions (DeployContract, Stake, AddKey, DeleteKey, DeleteAccount) hide the Receiver field and auto-set `receiver_id` to the signer account via `receiverIsImplicit`; this mirrors the NEAR protocol's `check_actor_permissions` constraint that requires sender==receiver for these action types
+- Non-self-targeting actions (Transfer, FunctionCall, CreateAccount) show the Receiver field independently from signer selection
+- Credential source is auto-resolved by the backend; `sign_transaction` calls omit `credential_source` for software keys
 - Confirmation modal supports three actions:
   - Cancel
   - Sign
   - Sign + broadcast
 - Broadcast results are summarized via `web/src/lib/broadcastSummary.ts`
-  - tx hash is shown on both success and failure paths
+  - tx hash is shown as a clickable link on success, submission, and failure paths
+  - `broadcast_tx_commit` falls back to `broadcast_tx_async` on RPC timeout; `async_submitted` marker yields `success: null` (submitted but execution unknown)
   - raw RPC broadcast payload remains available for inspection when present
 
-### 9.4 Frontend Test Harness
+### 9.5 Frontend Test Harness
 
 Minimal frontend unit/smoke coverage now exists under `web/`.
 
@@ -463,9 +518,13 @@ Minimal frontend unit/smoke coverage now exists under `web/`.
   - `web/vite.config.ts`
   - `web/src/test/setup.ts`
 - Current targeted tests:
+  - `web/src/api/retry.test.ts`
+  - `web/src/components/FilterableCombobox.test.tsx`
   - `web/src/hooks/useAccountPrefs.test.tsx`
-  - `web/src/lib/signerSummaryStatus.test.ts`
   - `web/src/lib/broadcastSummary.test.ts`
+  - `web/src/lib/signerSourceSelection.test.ts`
+  - `web/src/lib/signerSummaryStatus.test.ts`
+  - `web/src/lib/sourceUpgrade.test.ts`
 
 This is not a full browser E2E replacement. For signer regressions, keep desktop/manual validation for staking and Sign Tx flows in addition to `npm --prefix web run test`.
 
@@ -541,7 +600,9 @@ Roundtrip assertion added:
 
 ## 13. Operational Commands
 
-Core checks:
+A top-level `Makefile` provides convenience targets (`make help` for full list). The commands below are the underlying invocations.
+
+### 13.1 Core Checks
 
 ```bash
 cargo check --bin nearx
@@ -555,36 +616,44 @@ cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml
 cargo check --manifest-path tauri-workspace/src-tauri/Cargo.toml --features e2e
 ```
 
-Web frontend typecheck:
+### 13.2 Web Frontend
 
 ```bash
-cd web && npx tsc -b
+cd web && npx tsc -b          # typecheck only
+npm --prefix web run test      # Vitest unit tests
 ```
 
-Web frontend tests:
+### 13.3 Desktop Dev
 
 ```bash
-npm --prefix web run test
+node tools/build-sidecar.mjs   # build nearxd sidecar (required for Tauri dev)
+cd tauri-workspace && cargo tauri dev   # starts Vite + spawns nearxd sidecar
 ```
 
-Build nearxd sidecar (required for Tauri dev):
+### 13.4 E2E
 
 ```bash
-node tools/build-sidecar.mjs
+cd e2e-tests && npm test
 ```
 
-Tauri dev (single command — starts Vite + spawns nearxd sidecar):
+### 13.5 Tools Directory
 
-```bash
-cd tauri-workspace && cargo tauri dev
-```
+- `tools/build-sidecar.mjs` - copies nearxd binary into Tauri sidecar bundle location
+- `tools/build-sidecar.sh` - shell wrapper invoked by `make sidecar`
+- `tools/build-macos-qa.sh` - local macOS signed QA build (prefers `Developer ID Application`, falls back to `Apple Development`)
+- `tools/sync-explorer.sh` - upstream explorer-frontend sync tool (see section 10)
+- `tools/preflight.sh` - pre-release checks
+- `tools/alpha_preflight.sh` - alpha release checks
+- `tools/release.sh` - release automation
+- `tools/list_recent_by_git.sh` - list recently modified files by git history
+- `tools/list_recent_created.sh` - list recently created files
 
-E2E smoke:
+### 13.6 Dependency Versions
 
-```bash
-cd e2e-tests
-npm test
-```
+- Rust toolchain: 1.89.0 (pinned in `rust-toolchain.toml`)
+- `near-primitives` 0.27.0 — supports the classic 8 action types + Delegate; newer nearcore types (DeployGlobalContract, UseGlobalContract, TransferToGasKey, WithdrawFromGasKey) are not available at this version
+- `near-crypto` 0.27.0
+- `interprocess` — local socket transport (used by nearxd, Tauri, native-host via `nearx-broker-ipc`)
 
 ## 14. Continuity Rules
 
@@ -613,6 +682,16 @@ When syncing explorer upstream:
 2. if taking upstream changes, verify NEARx integrations (Tauri hooks, dark mode, Sidebar) still work
 3. run `--bump` only after all divergences are resolved or intentional
 4. if adding new NEARx-only files under `web/`, add them to `nearx_only` in `web/.explorer-upstream.json`
+
+When adding new NEAR action types:
+
+1. check nearcore `check_actor_permissions` (`runtime/runtime/src/actions.rs`) for the sender==receiver constraint
+2. self-targeting actions (sender must equal receiver): DeployContract, Stake, AddKey, DeleteKey, DeleteAccount
+3. different-receiver actions: Transfer, FunctionCall, CreateAccount
+4. update frontend `receiverIsImplicit` in `web/src/pages/SignTransaction.tsx`
+5. update backend validation in `src/bin/nearxd/broker.rs` (self-targeting guard after `parse_near_actions`)
+6. update action type docs in `docs/NEARXD.md`
+7. update `near-primitives` version note in section 13.6 if upgrading
 
 When discovering stale docs or duplicates:
 
